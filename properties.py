@@ -77,6 +77,13 @@ class THERMEdgeProperties(bpy.types.PropertyGroup):
         description="Odwróć kierunek wszystkich krawędzi (dla kierunku lewostronnego w THERM)",
         default=True
     )
+    
+    # W pliku properties.py, w klasie THERMEdgeProperties, dodaj:
+    usection_name: bpy.props.StringProperty(
+        name="U-Section Name",
+        description="Nazwa sekcji U dla automatycznego tworzenia",
+        default="U1"
+    )
 
 def register():
     bpy.utils.register_class(THERMProperties)
