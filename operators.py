@@ -387,9 +387,36 @@ class THERM_OT_export_to_therm(bpy.types.Operator):
 
 class THERM_OT_create_usection_base(bpy.types.Operator):
     """Klasa bazowa dla tworzenia sekcji U"""
-    bl_options = {'REGISTER', 'UNDO'}
+
     
-    usection_name: bpy.props.StringProperty()
+    socket_map = {
+        'u1': 'Socket_25',
+        'usection': 'Socket_2',
+        'y': 'Socket_24', 
+        'u-value': 'Socket_26',
+        'r01': 'Socket_28',
+        'r02': 'Socket_29',
+        'r03': 'Socket_30',
+        'r04': 'Socket_31',
+        'r05': 'Socket_32',
+        'r06': 'Socket_33',
+        'r07': 'Socket_34',
+        'r08': 'Socket_35',
+        'r09': 'Socket_36',
+        'r10': 'Socket_37',
+        'ti': 'Socket_22',
+        'te': 'Socket_23',
+        'm01': 'Socket_8',
+        'm02': 'Socket_14',
+        'm03': 'Socket_15',
+        'm04': 'Socket_16',
+        'm05': 'Socket_17',
+        'm06': 'Socket_18',
+        'm07': 'Socket_19',
+        'm08': 'Socket_20',
+        'm09': 'Socket_13',
+        'm10': 'Socket_12',
+    }
     
     def find_ti_curves_from_selected(self):
         """Znajduje krzywe Ti tylko z zaznaczonych obiektów/kolekcji"""
@@ -471,7 +498,7 @@ class THERM_OT_create_usection_base(bpy.types.Operator):
         return node_group
     
     def set_geometry_nodes_values(self, curve_obj, usection_name, modifier):
-        """Ustawia wartości w geometry nodes - UŻYWAJĄC ID SOCKETÓW"""
+        """Ustawia wartości w geometry nodes - POPRAWIONE I UJEDNOLICONE"""
         try:
             # Znajdź krzywe Ti i Te
             ti_curves = self.find_all_ti_curves()
@@ -482,98 +509,292 @@ class THERM_OT_create_usection_base(bpy.types.Operator):
             
             print(f"Ustawianie Geometry Nodes dla {curve_obj.name}:")
             
-            if not modifier.node_group:
-                print("  ❌ Brak grupy węzłów")
-                return False
-            
-            # MAPOWANIE UŻYWAJĄC ID SOCKETÓW Z INTERFEJSU
-            socket_map = {}
-            for item in modifier.node_group.interface.items_tree:
-                if hasattr(item, 'in_out') and item.in_out == 'INPUT':
-                    socket_name = item.name.lower()
-                    socket_id = getattr(item, 'identifier', None)
-                    
-                    if socket_id:
-                        socket_map[socket_name] = socket_id
-            
-            print(f"  Mapowanie z interfejsu: {socket_map}")
-            
-            # Ustaw wartości w modyfikatorze Geometry Nodes
             available_inputs = list(modifier.keys())
-            print(f"  Dostępne socket-y w modyfikatorze: {sorted(available_inputs)}")
+            print(f"  Dostępne socket-y: {sorted(available_inputs)}")
+            
+            # Używaj mapowania socketów
+            socket_map = self.socket_map
             
             results = {}
             
-            # Ustaw USection
+            # Ustaw podstawowe wartości
             if 'usection' in socket_map and socket_map['usection'] in available_inputs:
                 modifier[socket_map['usection']] = usection_name
                 print(f"  ✅ Ustawiono {socket_map['usection']} (USection) = {usection_name}")
                 results['usection'] = True
-            else:
-                print(f"  ❌ Nie znaleziono socketu USection: {socket_map.get('usection')}")
-                results['usection'] = False
             
             # Ustaw Ti
             if 'ti' in socket_map and socket_map['ti'] in available_inputs and ti_curves:
                 modifier[socket_map['ti']] = ti_curves[0]
                 print(f"  ✅ Ustawiono {socket_map['ti']} (Ti) = {ti_curves[0].name}")
                 results['ti'] = True
-            else:
-                print(f"  ❌ Nie znaleziono socketu Ti: {socket_map.get('ti')}")
-                results['ti'] = False
             
-            # Ustaw Te
+            # Ustaw Te  
             if 'te' in socket_map and socket_map['te'] in available_inputs and te_curves:
                 modifier[socket_map['te']] = te_curves[0]
                 print(f"  ✅ Ustawiono {socket_map['te']} (Te) = {te_curves[0].name}")
                 results['te'] = True
-            else:
-                print(f"  ❌ Nie znaleziono socketu Te: {socket_map.get('te')}")
-                results['te'] = False
             
-            # Ustaw Obiekty (szukaj socketów Object)
+            # Ustaw obiekty i wartości conductivity
             objects_set = 0
-            object_sockets = []
+            conductivity_values_set = 0
             
-            # Znajdź wszystkie socket-y Object
-            for socket_name, socket_id in socket_map.items():
-                if 'object' in socket_name and socket_id in available_inputs:
-                    object_sockets.append(socket_id)
+            # Mapowanie socketów obiektów M01-M10
+            object_keys = ['m01', 'm02', 'm03', 'm04', 'm05', 'm06', 'm07', 'm08', 'm09', 'm10']
+            conductivity_keys = ['r01', 'r02', 'r03', 'r04', 'r05', 'r06', 'r07', 'r08', 'r09', 'r10']
             
-            # Jeśli nie znaleziono po nazwie, szukaj po ID
-            if not object_sockets:
-                # Socket-y Object z debugu: 8, 14, 15, 16, 17, 18, 19, 20, 13, 12
-                object_sockets = ['Socket_14', 'Socket_15', 'Socket_16', 'Socket_17', 'Socket_18', 
-                                'Socket_19', 'Socket_20', 'Socket_13', 'Socket_12', 'Socket_8']
-            
-            # Ustaw obiekty
-            for i, socket_id in enumerate(object_sockets):
-                if socket_id in available_inputs and i < len(mesh_objects):
-                    modifier[socket_id] = mesh_objects[i]
-                    print(f"  ✅ Ustawiono {socket_id} (M{i+1}) = {mesh_objects[i].name}")
+            for i, (obj_key, cond_key) in enumerate(zip(object_keys, conductivity_keys)):
+                if (obj_key in socket_map and socket_map[obj_key] in available_inputs and 
+                    i < len(mesh_objects)):
+                    
+                    # Ustaw obiekt
+                    modifier[socket_map[obj_key]] = mesh_objects[i]
+                    print(f"  ✅ Ustawiono {socket_map[obj_key]} ({obj_key.upper()}) = {mesh_objects[i].name}")
                     objects_set += 1
+                    
+                    # Ustaw wartość conductivity
+                    if cond_key in socket_map and socket_map[cond_key] in available_inputs:
+                        conductivity = self.get_material_conductivity(mesh_objects[i])
+                        try:
+                            modifier[socket_map[cond_key]] = conductivity
+                            print(f"  ✅ Ustawiono {socket_map[cond_key]} ({cond_key.upper()}) = {conductivity} W/mK")
+                            conductivity_values_set += 1
+                        except Exception as e:
+                            print(f"  ❌ Błąd ustawiania {socket_map[cond_key]}: {e}")
             
-            results['object'] = objects_set > 0
-            if objects_set > 0:
-                print(f"  ✅ Ustawiono {objects_set} obiektów")
-            else:
-                print(f"  ❌ Nie ustawiono żadnych obiektów")
-            
-            # Podsumowanie
-            print("  📊 Podsumowanie:")
-            print(f"     USECTION: {'✅' if results['usection'] else '❌'}")
-            print(f"     TI: {'✅' if results['ti'] else '❌'}")
-            print(f"     TE: {'✅' if results['te'] else '❌'}")
-            print(f"     OBJECT: {'✅' if results['object'] else '❌'} ({objects_set} obiektów)")
-            
-            return any(results.values())
+            print(f"  ✅ Ustawiono {objects_set} obiektów i {conductivity_values_set} wartości conductivity")
+            return True
                             
         except Exception as e:
             print(f"Błąd ustawiania geometry nodes: {e}")
             import traceback
             traceback.print_exc()
-            return False    
-       
+            return False
+
+
+
+
+    def find_conductivity_sockets(self, available_inputs):
+        """Znajduje właściwe sockety dla wartości conductivity - POPRAWIONE"""
+        conductivity_sockets = []
+        
+        # Używamy mapowania z socket_map dla R01-R10
+        r_sockets = []
+        for i in range(1, 11):
+            r_key = f'r{i:02d}'
+            if r_key in self.socket_map and self.socket_map[r_key] in available_inputs:
+                r_sockets.append(self.socket_map[r_key])
+        
+        # Posortuj sockety R01-R10
+        r_sockets.sort()
+        
+        return r_sockets
+        
+    def find_r_sockets(self, available_inputs):
+        """Znajduje socket-y R01-R10 w dostępnych inputach"""
+        r_sockets = []
+        
+        # Szukaj socketów o nazwach związanych z R/conductivity
+        r_keywords = ['r', 'conductivity', 'lambda', 'thermal']
+        
+        for socket_id in available_inputs:
+            socket_lower = socket_id.lower()
+            
+            # Szukaj socketów R01, R02, etc.
+            if socket_lower.startswith('socket_'):
+                # Sprawdź czy to może być socket R (pomijamy już znane socket-y)
+                if any(keyword in socket_lower for keyword in r_keywords):
+                    r_sockets.append(socket_id)
+        
+        # Jeśli nie znaleziono po nazwach, spróbuj znaleźć wolne socket-y float
+        if not r_sockets:
+            # Socket-y które mogą być dla wartości R (float)
+            possible_r_sockets = ['Socket_3', 'Socket_4', 'Socket_5', 'Socket_6', 'Socket_7',
+                                'Socket_9', 'Socket_10', 'Socket_11', 'Socket_24', 'Socket_25']
+            
+            for socket_id in possible_r_sockets:
+                if socket_id in available_inputs and socket_id not in r_sockets:
+                    r_sockets.append(socket_id)
+        
+        # Ogranicz do 10 socketów (R01-R10)
+        return r_sockets[:10]
+
+    def get_material_conductivity(self, mesh_object):
+        """Pobiera wartość conductivity z materiału obiektu - POPRAWIONA WERSJA"""
+        try:
+            if not mesh_object.data.materials:
+                print(f"    ❌ Obiekt {mesh_object.name} nie ma materiałów")
+                return 0.04  # Wartość domyślna
+            
+            # Weź pierwszy materiał
+            material = mesh_object.data.materials[0]
+            if not material:
+                return 0.04
+            
+            print(f"    🔍 Szukam conductivity w materiale: {material.name}")
+            
+            # METODA 1: Sprawdź CUSTOM PROPERTIES (najpierw)
+            if 'conductivity' in material:
+                conductivity = material['conductivity']
+                print(f"    ✅ Znaleziono conductivity w custom properties: {conductivity}")
+                return conductivity
+            if 'thermal_conductivity' in material:
+                conductivity = material['thermal_conductivity']
+                print(f"    ✅ Znaleziono thermal_conductivity w custom properties: {conductivity}")
+                return conductivity
+            if 'lambda' in material:
+                conductivity = material['lambda']
+                print(f"    ✅ Znaleziono lambda w custom properties: {conductivity}")
+                return conductivity
+            
+            # METODA 2: Sprawdź NODE'y MATERIALU (główna metoda)
+            if material.use_nodes:
+                print(f"    🔍 Przeszukuję node'y materiału...")
+                
+                for node in material.node_tree.nodes:
+                    node_name = node.name
+                    node_label = getattr(node, 'label', '') or ''
+                    
+                    print(f"    🔍 Node: {node_name}, Label: '{node_label}'")
+                    
+                    # SPRAWDŹ CZY NODE MA LABEL "conductivity"
+                    if node_label and 'conductivity' in node_label.lower():
+                        print(f"    ✅ Znaleziono node z label 'conductivity': {node_name}")
+                        
+                        # Sprawdź wartość w outputach node'a
+                        if hasattr(node, 'outputs') and node.outputs:
+                            for output in node.outputs:
+                                if hasattr(output, 'default_value'):
+                                    conductivity = output.default_value
+                                    print(f"    ✅ Pobrano conductivity z output {output.name}: {conductivity}")
+                                    return conductivity
+                        
+                        # Jeśli nie ma outputów, sprawdź czy to node Value
+                        if hasattr(node, 'inputs') and node.inputs and hasattr(node.inputs[0], 'default_value'):
+                            conductivity = node.inputs[0].default_value
+                            print(f"    ✅ Pobrano conductivity z node Value: {conductivity}")
+                            return conductivity
+                    
+                    # SPRAWDŹ CZY NODE MA NAME "conductivity"
+                    if 'conductivity' in node_name.lower():
+                        print(f"    ✅ Znaleziono node z name 'conductivity': {node_name}")
+                        
+                        if hasattr(node, 'outputs') and node.outputs:
+                            for output in node.outputs:
+                                if hasattr(output, 'default_value'):
+                                    conductivity = output.default_value
+                                    print(f"    ✅ Pobrano conductivity z output: {conductivity}")
+                                    return conductivity
+                        
+                        if hasattr(node, 'inputs') and node.inputs and hasattr(node.inputs[0], 'default_value'):
+                            conductivity = node.inputs[0].default_value
+                            print(f"    ✅ Pobrano conductivity z node inputs: {conductivity}")
+                            return conductivity
+                    
+                    # SPRAWDŹ SPECJALNIE DLA NODE'ÓW VALUE
+                    if node.bl_idname == 'ShaderNodeValue':
+                        node_value = getattr(node, 'outputs', [])
+                        if node_value and hasattr(node_value[0], 'default_value'):
+                            conductivity = node_value[0].default_value
+                            # Sprawdź czy wartość jest realistyczna (nie 0.0)
+                            if conductivity > 0.001:
+                                print(f"    ✅ Pobrano conductivity z ShaderNodeValue: {conductivity}")
+                                return conductivity
+            
+            # METODA 3: Sprawdź po nazwie materiału (fallback)
+            material_name_lower = material.name.lower()
+            print(f"    🔍 Sprawdzam nazwę materiału: {material_name_lower}")
+            
+            material_conductivity_map = {
+                'beton': 1.7, 'concrete': 1.7, 'cement': 1.7,
+                'cegła': 0.8, 'brick': 0.8, 'ceramika': 0.8,
+                'drewno': 0.15, 'wood': 0.15, 'timber': 0.15,
+                'szkło': 1.0, 'glass': 1.0,
+                'stal': 50.0, 'steel': 50.0, 'metal': 50.0,
+                'aluminium': 200.0, 'aluminum': 200.0,
+                'izolacja': 0.04, 'insulation': 0.04, 'wełna': 0.04, 'wool': 0.04,
+                'styropian': 0.035, 'eps': 0.035, 'xps': 0.035,
+                'l0_80': 0.80, 'l0_04': 0.04, 'l0_15': 0.15, 'l0_035': 0.035,
+                'l0_113': 0.113, 'l0_113_rama': 0.113  # Dodaj specyficzne nazwy z Twoich materiałów
+            }
+            
+            for material_keyword, conductivity_value in material_conductivity_map.items():
+                if material_keyword in material_name_lower:
+                    print(f"    ✅ Znaleziono conductivity po nazwie '{material_keyword}': {conductivity_value}")
+                    return conductivity_value
+            
+            print(f"    ⚠️  Nie znaleziono conductivity, używam wartości domyślnej 0.04 W/mK")
+            return 0.04  # Wartość domyślna dla izolacji
+                
+        except Exception as e:
+            print(f"    ❌ Błąd pobierania conductivity: {e}")
+            import traceback
+            traceback.print_exc()
+            return 0.04  # Wartość domyślna
+
+
+
+
+
+
+    def find_conductivity_in_material(self, material):
+        """Znajduje wartość conductivity w materiale"""
+        
+        # METODA 1: Sprawdź właściwości materiału
+        if hasattr(material, 'thermal_conductivity'):
+            return material.thermal_conductivity
+        
+        # METODA 2: Sprawdź custom properties
+        if 'conductivity' in material:
+            return material['conductivity']
+        if 'thermal_conductivity' in material:
+            return material['thermal_conductivity'] 
+        if 'lambda' in material:
+            return material['lambda']
+        
+        # METODA 3: Sprawdź w node'ach materiału
+        if material.use_nodes:
+            for node in material.node_tree.nodes:
+                # Sprawdź czy node ma conductivity
+                if hasattr(node, 'inputs'):
+                    for input in node.inputs:
+                        if input and hasattr(input, 'default_value'):
+                            # Sprawdź nazwę inputa
+                            if input.name.lower() in ['conductivity', 'thermal conductivity', 'lambda']:
+                                return input.default_value
+                
+                # Sprawdź nazwę i label node'a
+                node_name_lower = node.name.lower()
+                node_label_lower = node.label.lower() if node.label else ""
+                
+                if any(keyword in node_name_lower for keyword in ['conductivity', 'thermal', 'lambda']):
+                    if hasattr(node, 'outputs') and node.outputs:
+                        # Spróbuj pobrać wartość z pierwszego outputa
+                        try:
+                            return node.outputs[0].default_value
+                        except:
+                            pass
+        
+        # METODA 4: Sprawdź po nazwie materiału (heurystyka)
+        material_name_lower = material.name.lower()
+        
+        # Mapowanie nazw materiałów na typowe wartości conductivity
+        material_conductivity_map = {
+            'beton': 1.7, 'concrete': 1.7, 'cement': 1.7,
+            'cegła': 0.8, 'brick': 0.8, 'ceramika': 0.8,
+            'drewno': 0.15, 'wood': 0.15, 'timber': 0.15,
+            'szkło': 1.0, 'glass': 1.0,
+            'stal': 50.0, 'steel': 50.0, 'metal': 50.0,
+            'aluminium': 200.0, 'aluminum': 200.0,
+            'izolacja': 0.04, 'insulation': 0.04, 'wełna': 0.04, 'wool': 0.04,
+            'styropian': 0.035, 'eps': 0.035, 'xps': 0.035
+        }
+        
+        for material_keyword, conductivity_value in material_conductivity_map.items():
+            if material_keyword in material_name_lower:
+                return conductivity_value
+        
+        return None
         
     def find_all_ti_curves(self):
         """Znajduje wszystkie krzywe Ti w scenie"""
