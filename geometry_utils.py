@@ -1,6 +1,6 @@
 import bpy
 import bmesh
-from mathutils import Vector
+from mathutils import Vector, geometry
 import math
 
 def flip_downward_faces_only():
@@ -258,3 +258,115 @@ def round_vertices_to_precision(precision=0.1):
             pass
     
     return vertices_modified
+
+# =============================================================================
+# FUNKCJE DO OBLICZANIA GRUBOŚCI
+# =============================================================================
+
+def get_curve_points_world(curve_obj):
+    """Pobiera punkty krzywej w przestrzeni świata"""
+    points = []
+    world_matrix = curve_obj.matrix_world
+    
+    for spline in curve_obj.data.splines:
+        if spline.type == 'POLY' and len(spline.points) >= 2:
+            for point in spline.points[:2]:  # Tylko pierwsze 2 punkty
+                world_point = world_matrix @ point.co.xyz
+                points.append(world_point)
+    
+    return points
+
+def find_closest_point_on_line(point, line_start, line_end):
+    """Znajduje najbliższy punkt na linii do danego punktu"""
+    line_vec = line_end - line_start
+    point_vec = point - line_start
+    
+    line_length = line_vec.length
+    line_unitvec = line_vec.normalized()
+    
+    # Rzut punktu na linię
+    projection_length = point_vec.dot(line_unitvec)
+    projection_length = max(0, min(projection_length, line_length))
+    
+    return line_start + line_unitvec * projection_length
+
+def calculate_material_thickness(mesh_object, ti_curve, te_curve):
+    """Oblicza grubość materiału jako odległość prostopadłą między krzywymi Ti i Te"""
+    try:
+        print(f"🔍 Obliczanie grubości dla: {mesh_object.name}")
+        
+        # Pobierz punkty z krzywych Ti i Te
+        ti_points = get_curve_points_world(ti_curve)
+        te_points = get_curve_points_world(te_curve)
+        
+        if len(ti_points) < 2 or len(te_points) < 2:
+            print("❌ Krzywe muszą mieć co najmniej 2 punkty")
+            return 0.0
+        
+        # Weź środkowy punkt krzywej Ti jako punkt odniesienia
+        ti_midpoint = (ti_points[0] + ti_points[1]) / 2
+        ti_direction = (ti_points[1] - ti_points[0]).normalized()
+        
+        # Znajdź najbliższy punkt na krzywej Te
+        closest_te_point = find_closest_point_on_line(ti_midpoint, te_points[0], te_points[1])
+        
+        # Oblicz wektor prostopadły do Ti
+        perpendicular_vector = Vector((-ti_direction.y, ti_direction.x, 0))
+        
+        # Oblicz odległość prostopadłą
+        thickness_vector = closest_te_point - ti_midpoint
+        perpendicular_distance = abs(thickness_vector.dot(perpendicular_vector))
+        
+        print(f"✅ Grubość prostopadła {mesh_object.name}: {perpendicular_distance:.4f}m")
+        return perpendicular_distance
+        
+    except Exception as e:
+        print(f"❌ Błąd obliczania grubości: {e}")
+        return 0.0
+
+def get_mesh_dimensions(mesh_object, ti_curve, te_curve):
+    """Oblicza wymiary mesha w kierunku prostopadłym do krzywych Ti/Te"""
+    try:
+        # Pobierz bounding box w przestrzeni świata
+        bbox_corners = [mesh_object.matrix_world @ Vector(corner) for corner in mesh_object.bound_box]
+        
+        # Pobierz kierunek krzywej Ti
+        ti_points = get_curve_points_world(ti_curve)
+        if len(ti_points) < 2:
+            return 0.0
+        
+        ti_direction = (ti_points[1] - ti_points[0]).normalized()
+        perpendicular_direction = Vector((-ti_direction.y, ti_direction.x, 0))
+        
+        # Rzut wszystkie punkty bounding box na kierunek prostopadły
+        projections = [point.dot(perpendicular_direction) for point in bbox_corners]
+        
+        # Oblicz rozpiętość (grubość) w kierunku prostopadłym
+        thickness = max(projections) - min(projections)
+        
+        print(f"📏 Wymiar BBox {mesh_object.name}: {thickness:.4f}m")
+        return thickness
+        
+    except Exception as e:
+        print(f"❌ Błąd obliczania wymiarów: {e}")
+        return 0.0
+
+def calculate_smart_thickness(mesh_object, ti_curve, te_curve):
+    """Zawsze używa bounding box do obliczania grubości"""
+    try:
+        print(f"🧮 OBLICZANIE GRUBOŚCI BOUNDING BOX: {mesh_object.name}")
+        
+        # Użyj tylko metody bounding box
+        thickness = get_mesh_dimensions(mesh_object, ti_curve, te_curve)
+        
+        # Sprawdź czy wartość jest realistyczna
+        if 0.001 <= thickness <= 2.0:
+            print(f"✅ GRUBOŚĆ BOUNDING BOX: {thickness:.4f}m")
+        else:
+            print(f"⚠️  NIEREALISTYCZNA GRUBOŚĆ: {thickness:.4f}m")
+        
+        return thickness
+        
+    except Exception as e:
+        print(f"❌ Błąd obliczania grubości: {e}")
+        return 0.0

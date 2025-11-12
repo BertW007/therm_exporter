@@ -265,8 +265,7 @@ class THERM_PT_panel(bpy.types.Panel):
                 row = col.row()
                 row.label(text="Plik .thm nie istnieje", icon='ERROR')
             
-            row = col.row()
-            row.operator("therm.open_therm_folder", text="Otwórz folder", icon='FILE_FOLDER')
+
 
         # SEKCJA U-SECTIONS
         box = layout.box()
@@ -314,6 +313,53 @@ class THERM_PT_panel(bpy.types.Panel):
         # W panels.py, w sekcji U-Sections:
         row = box.row()
         row.operator("therm.debug_sockets", text="Debug Sockets", icon='NODETREE')
+
+
+        # Eksport do Excel
+        box = layout.box()
+        box.label(text="Eksport do Excel:", icon='EXPORT')
+        
+        col = box.column()
+        col.label(text="Eksportuje dane z .thmx i Geometry Nodes")
+        col.label(text="do pliku Excel na podstawie wzorca")
+        
+        # Sprawdź warunki
+        blend_filepath = bpy.data.filepath
+        if not blend_filepath:
+            col.label(text="Zapisz plik Blender aby użyć tej funkcji", icon='ERROR')
+        else:
+            blend_filename = os.path.splitext(os.path.basename(blend_filepath))[0]
+            blend_directory = os.path.dirname(blend_filepath)
+            
+            thmx_file = os.path.join(blend_directory, f"{blend_filename}.thmx")
+            template_file = os.path.join(blend_directory, "wzorzec.xlsx")
+            
+            conditions_ok = True
+            
+            if not os.path.exists(thmx_file):
+                col.label(text="Plik .thmx nie istnieje", icon='ERROR')
+                conditions_ok = False
+            
+            if not os.path.exists(template_file):
+                col.label(text="Plik wzorca.xlsx nie istnieje", icon='ERROR')
+                conditions_ok = False
+            
+            selected_curves = [obj for obj in bpy.context.selected_objects 
+                             if obj.type == 'CURVE' and obj.name.startswith('USection_')]
+            
+            if not selected_curves:
+                col.label(text="Zaznacz krzywe USection", icon='ERROR')
+                conditions_ok = False
+            else:
+                col.label(text=f"Zaznaczono {len(selected_curves)} krzywych USection", icon='CHECKMARK')
+            
+            if conditions_ok:
+                col.operator("therm.export_to_excel", text="Eksportuj do Excel", icon='EXPORT')
+            else:
+                col.label(text="Spełnij wszystkie warunki powyżej", icon='INFO')
+        row = col.row()
+        row.operator("therm.open_therm_folder", text="Otwórz folder", icon='FILE_FOLDER')
+
 
 # Nowy operator do przełączania widoczności obiektów
 class THERM_OT_toggle_show_objects(bpy.types.Operator):

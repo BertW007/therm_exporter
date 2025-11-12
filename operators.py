@@ -2,6 +2,18 @@ import bpy
 import os
 import subprocess
 from . import geometry_utils, boundary_conditions, therm_export, therm_import, therm_runner
+import xml.etree.ElementTree as ET
+import shutil
+import os
+
+
+# Import funkcji do obliczania grubości
+from .geometry_utils import (
+    calculate_material_thickness, 
+    get_mesh_dimensions, 
+    calculate_smart_thickness,
+    get_curve_points_world
+)
 
 # Operatory dla sprawdzania i naprawy geometrii
 class THERM_OT_check_normals(bpy.types.Operator):
@@ -382,41 +394,29 @@ class THERM_OT_export_to_therm(bpy.types.Operator):
         except Exception as e:
             print(f"Nie można otworzyć folderu: {e}")
 
-
-# W pliku operators.py, dodaj te klasy operatorów:
-
+# Klasa bazowa dla tworzenia sekcji U z grubościami materiałów
 class THERM_OT_create_usection_base(bpy.types.Operator):
-    """Klasa bazowa dla tworzenia sekcji U"""
-
+    """Klasa bazowa dla tworzenia sekcji U z grubościami materiałów"""
+    bl_options = {'REGISTER', 'UNDO'}
     
     socket_map = {
         'u1': 'Socket_25',
         'usection': 'Socket_2',
         'y': 'Socket_24', 
         'u-value': 'Socket_26',
-        'r01': 'Socket_28',
-        'r02': 'Socket_29',
-        'r03': 'Socket_30',
-        'r04': 'Socket_31',
-        'r05': 'Socket_32',
-        'r06': 'Socket_33',
-        'r07': 'Socket_34',
-        'r08': 'Socket_35',
-        'r09': 'Socket_36',
-        'r10': 'Socket_37',
-        'ti': 'Socket_22',
-        'te': 'Socket_23',
-        'm01': 'Socket_8',
-        'm02': 'Socket_14',
-        'm03': 'Socket_15',
-        'm04': 'Socket_16',
-        'm05': 'Socket_17',
-        'm06': 'Socket_18',
-        'm07': 'Socket_19',
-        'm08': 'Socket_20',
-        'm09': 'Socket_13',
-        'm10': 'Socket_12',
+        'r01': 'Socket_28', 'r02': 'Socket_29', 'r03': 'Socket_30', 'r04': 'Socket_31',
+        'r05': 'Socket_32', 'r06': 'Socket_33', 'r07': 'Socket_34', 'r08': 'Socket_35',
+        'r09': 'Socket_36', 'r10': 'Socket_37',
+        'ti': 'Socket_22', 'te': 'Socket_23',
+        'm01': 'Socket_8', 'm02': 'Socket_14', 'm03': 'Socket_15', 'm04': 'Socket_16',
+        'm05': 'Socket_17', 'm06': 'Socket_18', 'm07': 'Socket_19', 'm08': 'Socket_20',
+        'm09': 'Socket_13', 'm10': 'Socket_12',
+        # Dodaj sockety dla grubości jeśli są dostępne w Geometry Nodes
+        't01': 'Socket_3', 't02': 'Socket_4', 't03': 'Socket_5', 't04': 'Socket_6',
+        't05': 'Socket_7', 't06': 'Socket_9', 't07': 'Socket_10', 't08': 'Socket_11',
     }
+    
+    usection_name: bpy.props.StringProperty()
     
     def find_ti_curves_from_selected(self):
         """Znajduje krzywe Ti tylko z zaznaczonych obiektów/kolekcji"""
@@ -447,8 +447,214 @@ class THERM_OT_create_usection_base(bpy.types.Operator):
         target_name = f"USection_{usection_name}"
         return target_name in bpy.data.objects
     
+    def calculate_all_thicknesses(self, mesh_objects, ti_curve, te_curve):
+        """Oblicza grubości dla wszystkich obiektów siatki"""
+        thicknesses = []
+        
+        print("📐 INTELIGENTNE OBLICZANIE GRUBOŚCI MATERIAŁÓW:")
+        print("═" * 60)
+        
+        for i, mesh_obj in enumerate(mesh_objects):
+            # Użyj inteligentnej metody obliczania grubości
+            final_thickness = calculate_smart_thickness(mesh_obj, ti_curve, te_curve)
+            thicknesses.append(final_thickness)
+        
+        # Podsumowanie wszystkich grubości
+        print("📊 PODSUMOWANIE GRUBOŚCI:")
+        total_thickness = sum(thicknesses)
+        print(f"📏 SUMA GRUBOŚCI WSZYSTKICH WARSTW: {total_thickness:.4f}m")
+        
+        # Sprawdź czy suma grubości jest realistyczna
+        if total_thickness > 5.0:  # 5 metrów
+            print("⚠️  UWAGA: Suma grubości przekracza 5m - sprawdź poprawność!")
+        elif total_thickness < 0.1:  # 10 cm
+            print("⚠️  UWAGA: Suma grubości mniejsza niż 10cm - sprawdź poprawność!")
+        
+        print("═" * 60)
+        return thicknesses
+    
+    def set_basic_values(self, modifier, usection_name, ti_curve, te_curve):
+        """Ustawia podstawowe wartości w Geometry Nodes"""
+        available_inputs = list(modifier.keys())
+        
+        # Ustaw USection
+        if 'usection' in self.socket_map and self.socket_map['usection'] in available_inputs:
+            modifier[self.socket_map['usection']] = usection_name
+            print(f"✅ Ustawiono {self.socket_map['usection']} (USection) = {usection_name}")
+        
+        # Ustaw Ti
+        ti_curves = self.find_ti_curves_from_selected()
+        if 'ti' in self.socket_map and self.socket_map['ti'] in available_inputs and ti_curves:
+            modifier[self.socket_map['ti']] = ti_curves[0]
+            print(f"✅ Ustawiono {self.socket_map['ti']} (Ti) = {ti_curves[0].name}")
+        
+        # Ustaw Te  
+        te_curves = self.find_all_te_curves()
+        if 'te' in self.socket_map and self.socket_map['te'] in available_inputs and te_curves:
+            modifier[self.socket_map['te']] = te_curves[0] 
+            print(f"✅ Ustawiono {self.socket_map['te']} (Te) = {te_curves[0].name}")
+    
+    def calculate_u_value(self, thicknesses, conductivities, ti_rsi, te_rse):
+        """Oblicza współczynnik U (U-Value) na podstawie grubości, conductivity i oporów"""
+        try:
+            print("🧮 OBLICZANIE WSPÓŁCZYNNIKA U-VALUE:")
+            print("═" * 50)
+            
+            # Opory przejmowania ciepła (domyślne wartości z właściwości sceny)
+            Rsi = ti_rsi  # Opór wewnętrzny
+            Rse = te_rse  # Opór zewnętrzny
+            
+            print(f"📊 Opory przejmowania ciepła:")
+            print(f"   Rsi = {Rsi:.3f} m²K/W")
+            print(f"   Rse = {Rse:.3f} m²K/W")
+            
+            # Oblicz opory dla każdej warstwy: R = d / λ
+            layer_resistances = []
+            total_material_resistance = 0.0
+            
+            print("\n📋 OBLICZANIE OPORÓW WARSTW:")
+            print("No. | Grubość [m] | Conductivity [W/mK] | Opór R [m²K/W]")
+            print("----|-------------|-------------------|----------------")
+            
+            for i, (thickness, conductivity) in enumerate(zip(thicknesses, conductivities)):
+                if thickness > 0 and conductivity > 0:
+                    layer_resistance = thickness / conductivity
+                    layer_resistances.append(layer_resistance)
+                    total_material_resistance += layer_resistance
+                    print(f"{i+1:2d} | {thickness:11.4f} | {conductivity:17.4f} | {layer_resistance:14.4f}")
+                else:
+                    layer_resistances.append(0.0)
+                    print(f"{i+1:2d} | {thickness:11.4f} | {conductivity:17.4f} | {'BŁĄD':>14}")
+            
+            # Oblicz całkowity opór cieplny RT
+            RT = Rsi + total_material_resistance + Rse
+            
+            print(f"\n📊 SUMA OPORÓW MATERIAŁÓW: {total_material_resistance:.4f} m²K/W")
+            print(f"📊 CAŁKOWITY OPÓR RT: {RT:.4f} m²K/W")
+            print(f"   Rsi: {Rsi:.4f} m²K/W")
+            print(f"   ΣR_materiałów: {total_material_resistance:.4f} m²K/W") 
+            print(f"   Rse: {Rse:.4f} m²K/W")
+            
+            # Oblicz współczynnik U = 1 / RT
+            if RT > 0:
+                u_value = 1.0 / RT
+                print(f"🎯 WSPÓŁCZYNNIK U-VALUE: {u_value:.6f} W/m²K")
+            else:
+                u_value = 0.0
+                print(f"❌ BŁĄD: Całkowity opór RT = 0")
+            
+            print("═" * 50)
+            return u_value, RT, total_material_resistance
+            
+        except Exception as e:
+            print(f"❌ Błąd obliczania U-Value: {e}")
+            return 0.0, 0.0, 0.0
+
+    def set_geometry_nodes_values_with_thickness(self, curve_obj, usection_name, modifier, mesh_objects, ti_curve, te_curve):
+        """Ustawia wartości w geometry nodes z grubościami materiałów i oblicza U-Value"""
+        try:
+            available_inputs = list(modifier.keys())
+            
+            print(f"🎯 Ustawianie Geometry Nodes dla {curve_obj.name} z grubościami i U-Value:")
+            print("═" * 50)
+            
+            # Oblicz grubości materiałów
+            thicknesses = self.calculate_all_thicknesses(mesh_objects, ti_curve, te_curve)
+            
+            # Pobierz conductivities
+            conductivities = []
+            for mesh_obj in mesh_objects:
+                conductivity = self.get_material_conductivity(mesh_obj)
+                conductivities.append(conductivity)
+            
+            # Pobierz wartości Rsi i Rse z właściwości sceny
+            ti_rsi = bpy.context.scene.therm_edge_props.ti_rsi
+            te_rse = bpy.context.scene.therm_edge_props.te_rse
+            
+            # Oblicz U-Value
+            u_value, total_resistance, material_resistance = self.calculate_u_value(
+                thicknesses, conductivities, ti_rsi, te_rse
+            )
+            
+            # Ustaw podstawowe wartości
+            self.set_basic_values(modifier, usection_name, ti_curve, te_curve)
+            
+            # Ustaw U-Value w Geometry Nodes jeśli socket istnieje
+            if 'u-value' in self.socket_map and self.socket_map['u-value'] in available_inputs:
+                try:
+                    modifier[self.socket_map['u-value']] = u_value
+                    print(f"✅ Ustawiono {self.socket_map['u-value']} (U-Value) = {u_value:.6f} W/m²K")
+                except Exception as e:
+                    print(f"❌ Błąd ustawiania U-Value: {e}")
+            
+            # Ustaw obiekty, conductivities i grubości
+            objects_set = 0
+            conductivities_set = 0
+            thicknesses_set = 0
+            
+            # Mapowanie socketów
+            object_keys = ['m01', 'm02', 'm03', 'm04', 'm05', 'm06', 'm07', 'm08', 'm09', 'm10']
+            conductivity_keys = ['r01', 'r02', 'r03', 'r04', 'r05', 'r06', 'r07', 'r08', 'r09', 'r10']
+            thickness_keys = ['t01', 't02', 't03', 't04', 't05', 't06', 't07', 't08', 't09', 't10']
+            
+            for i, (obj_key, cond_key, thick_key) in enumerate(zip(object_keys, conductivity_keys, thickness_keys)):
+                if i >= len(mesh_objects):
+                    break
+                
+                # Ustaw obiekt
+                if obj_key in self.socket_map and self.socket_map[obj_key] in available_inputs:
+                    modifier[self.socket_map[obj_key]] = mesh_objects[i]
+                    print(f"✅ Ustawiono {self.socket_map[obj_key]} ({obj_key.upper()}) = {mesh_objects[i].name}")
+                    objects_set += 1
+                
+                # Ustaw conductivity
+                if cond_key in self.socket_map and self.socket_map[cond_key] in available_inputs:
+                    try:
+                        modifier[self.socket_map[cond_key]] = conductivities[i]
+                        print(f"✅ Ustawiono {self.socket_map[cond_key]} ({cond_key.upper()}) = {conductivities[i]:.4f} W/mK")
+                        conductivities_set += 1
+                    except Exception as e:
+                        print(f"❌ Błąd ustawiania conductivity: {e}")
+                
+                # Ustaw grubość
+                if thick_key in self.socket_map and self.socket_map[thick_key] in available_inputs:
+                    try:
+                        modifier[self.socket_map[thick_key]] = thicknesses[i]
+                        print(f"✅ Ustawiono {self.socket_map[thick_key]} ({thick_key.upper()}) = {thicknesses[i]:.4f} m")
+                        thicknesses_set += 1
+                    except Exception as e:
+                        print(f"❌ Błąd ustawiania grubości: {e}")
+            
+            # Podsumowanie
+            print("═" * 50)
+            print(f"📊 PODSUMOWANIE:")
+            print(f"   🏗️  Obiekty: {objects_set}/{len(mesh_objects)}")
+            print(f"   🔥 Conductivities: {conductivities_set}/{len(mesh_objects)}") 
+            print(f"   📏 Grubości: {thicknesses_set}/{len(mesh_objects)}")
+            print(f"   🎯 U-Value: {u_value:.6f} W/m²K")
+            print(f"   📊 Całkowity opór RT: {total_resistance:.4f} m²K/W")
+            
+            # Wypisz tabelę materiałów
+            print("\n📋 TABELA MATERIAŁÓW:")
+            print("No. | Obiekt | Grubość [m] | Conductivity [W/mK] | Opór R [m²K/W]")
+            print("----|--------|-------------|-------------------|----------------")
+            for i, (mesh_obj, thickness, conductivity) in enumerate(zip(mesh_objects, thicknesses, conductivities)):
+                if thickness > 0 and conductivity > 0:
+                    layer_resistance = thickness / conductivity
+                    print(f"{i+1:2d} | {mesh_obj.name:6} | {thickness:11.4f} | {conductivity:17.4f} | {layer_resistance:14.4f}")
+                else:
+                    print(f"{i+1:2d} | {mesh_obj.name:6} | {thickness:11.4f} | {conductivity:17.4f} | {'BŁĄD':>14}")
+            
+            return True
+                        
+        except Exception as e:
+            print(f"❌ Błąd ustawiania geometry nodes: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+    
     def create_usection_geometry_nodes(self, curve_obj, usection_name):
-        """Dodaje geometry nodes do krzywej U-Section i ustawia wartości"""
+        """Dodaje geometry nodes do krzywej U-Section i ustawia wartości z grubościami"""
         try:
             # Usuń istniejące modyfikatory geometry nodes
             for mod in curve_obj.modifiers:
@@ -463,13 +669,24 @@ class THERM_OT_create_usection_base(bpy.types.Operator):
             modifier = curve_obj.modifiers.new(name=f"THERM_U_{usection_name}", type='NODES')
             modifier.node_group = node_group
             
-            # Ustaw wartości w geometry nodes
-            success = self.set_geometry_nodes_values(curve_obj, usection_name, modifier)
+            # Znajdź potrzebne obiekty
+            mesh_objects = [obj for obj in bpy.context.selected_objects if obj.type == 'MESH']
+            ti_curves = self.find_ti_curves_from_selected()
+            te_curves = self.find_all_te_curves()
+            
+            if not ti_curves or not te_curves:
+                print("❌ Brak krzywych Ti lub Te")
+                return False, "Brak krzywych Ti lub Te"
+            
+            # Ustaw wartości z grubościami
+            success = self.set_geometry_nodes_values_with_thickness(
+                curve_obj, usection_name, modifier, mesh_objects, ti_curves[0], te_curves[0]
+            )
             
             return success, "Success"
             
         except Exception as e:
-            print(f"Błąd dodawania geometry nodes: {e}")
+            print(f"❌ Błąd dodawania geometry nodes: {e}")
             return False, str(e)
     
     def create_usection_node_group(self, node_group_name):
@@ -497,128 +714,6 @@ class THERM_OT_create_usection_base(bpy.types.Operator):
         
         return node_group
     
-    def set_geometry_nodes_values(self, curve_obj, usection_name, modifier):
-        """Ustawia wartości w geometry nodes - POPRAWIONE I UJEDNOLICONE"""
-        try:
-            # Znajdź krzywe Ti i Te
-            ti_curves = self.find_all_ti_curves()
-            te_curves = self.find_all_te_curves()
-            
-            # Znajdź obiekty siatki (geometrię)
-            mesh_objects = [obj for obj in bpy.context.selected_objects if obj.type == 'MESH']
-            
-            print(f"Ustawianie Geometry Nodes dla {curve_obj.name}:")
-            
-            available_inputs = list(modifier.keys())
-            print(f"  Dostępne socket-y: {sorted(available_inputs)}")
-            
-            # Używaj mapowania socketów
-            socket_map = self.socket_map
-            
-            results = {}
-            
-            # Ustaw podstawowe wartości
-            if 'usection' in socket_map and socket_map['usection'] in available_inputs:
-                modifier[socket_map['usection']] = usection_name
-                print(f"  ✅ Ustawiono {socket_map['usection']} (USection) = {usection_name}")
-                results['usection'] = True
-            
-            # Ustaw Ti
-            if 'ti' in socket_map and socket_map['ti'] in available_inputs and ti_curves:
-                modifier[socket_map['ti']] = ti_curves[0]
-                print(f"  ✅ Ustawiono {socket_map['ti']} (Ti) = {ti_curves[0].name}")
-                results['ti'] = True
-            
-            # Ustaw Te  
-            if 'te' in socket_map and socket_map['te'] in available_inputs and te_curves:
-                modifier[socket_map['te']] = te_curves[0]
-                print(f"  ✅ Ustawiono {socket_map['te']} (Te) = {te_curves[0].name}")
-                results['te'] = True
-            
-            # Ustaw obiekty i wartości conductivity
-            objects_set = 0
-            conductivity_values_set = 0
-            
-            # Mapowanie socketów obiektów M01-M10
-            object_keys = ['m01', 'm02', 'm03', 'm04', 'm05', 'm06', 'm07', 'm08', 'm09', 'm10']
-            conductivity_keys = ['r01', 'r02', 'r03', 'r04', 'r05', 'r06', 'r07', 'r08', 'r09', 'r10']
-            
-            for i, (obj_key, cond_key) in enumerate(zip(object_keys, conductivity_keys)):
-                if (obj_key in socket_map and socket_map[obj_key] in available_inputs and 
-                    i < len(mesh_objects)):
-                    
-                    # Ustaw obiekt
-                    modifier[socket_map[obj_key]] = mesh_objects[i]
-                    print(f"  ✅ Ustawiono {socket_map[obj_key]} ({obj_key.upper()}) = {mesh_objects[i].name}")
-                    objects_set += 1
-                    
-                    # Ustaw wartość conductivity
-                    if cond_key in socket_map and socket_map[cond_key] in available_inputs:
-                        conductivity = self.get_material_conductivity(mesh_objects[i])
-                        try:
-                            modifier[socket_map[cond_key]] = conductivity
-                            print(f"  ✅ Ustawiono {socket_map[cond_key]} ({cond_key.upper()}) = {conductivity} W/mK")
-                            conductivity_values_set += 1
-                        except Exception as e:
-                            print(f"  ❌ Błąd ustawiania {socket_map[cond_key]}: {e}")
-            
-            print(f"  ✅ Ustawiono {objects_set} obiektów i {conductivity_values_set} wartości conductivity")
-            return True
-                            
-        except Exception as e:
-            print(f"Błąd ustawiania geometry nodes: {e}")
-            import traceback
-            traceback.print_exc()
-            return False
-
-
-
-
-    def find_conductivity_sockets(self, available_inputs):
-        """Znajduje właściwe sockety dla wartości conductivity - POPRAWIONE"""
-        conductivity_sockets = []
-        
-        # Używamy mapowania z socket_map dla R01-R10
-        r_sockets = []
-        for i in range(1, 11):
-            r_key = f'r{i:02d}'
-            if r_key in self.socket_map and self.socket_map[r_key] in available_inputs:
-                r_sockets.append(self.socket_map[r_key])
-        
-        # Posortuj sockety R01-R10
-        r_sockets.sort()
-        
-        return r_sockets
-        
-    def find_r_sockets(self, available_inputs):
-        """Znajduje socket-y R01-R10 w dostępnych inputach"""
-        r_sockets = []
-        
-        # Szukaj socketów o nazwach związanych z R/conductivity
-        r_keywords = ['r', 'conductivity', 'lambda', 'thermal']
-        
-        for socket_id in available_inputs:
-            socket_lower = socket_id.lower()
-            
-            # Szukaj socketów R01, R02, etc.
-            if socket_lower.startswith('socket_'):
-                # Sprawdź czy to może być socket R (pomijamy już znane socket-y)
-                if any(keyword in socket_lower for keyword in r_keywords):
-                    r_sockets.append(socket_id)
-        
-        # Jeśli nie znaleziono po nazwach, spróbuj znaleźć wolne socket-y float
-        if not r_sockets:
-            # Socket-y które mogą być dla wartości R (float)
-            possible_r_sockets = ['Socket_3', 'Socket_4', 'Socket_5', 'Socket_6', 'Socket_7',
-                                'Socket_9', 'Socket_10', 'Socket_11', 'Socket_24', 'Socket_25']
-            
-            for socket_id in possible_r_sockets:
-                if socket_id in available_inputs and socket_id not in r_sockets:
-                    r_sockets.append(socket_id)
-        
-        # Ogranicz do 10 socketów (R01-R10)
-        return r_sockets[:10]
-
     def get_material_conductivity(self, mesh_object):
         """Pobiera wartość conductivity z materiału obiektu - POPRAWIONA WERSJA"""
         try:
@@ -715,7 +810,7 @@ class THERM_OT_create_usection_base(bpy.types.Operator):
                 'izolacja': 0.04, 'insulation': 0.04, 'wełna': 0.04, 'wool': 0.04,
                 'styropian': 0.035, 'eps': 0.035, 'xps': 0.035,
                 'l0_80': 0.80, 'l0_04': 0.04, 'l0_15': 0.15, 'l0_035': 0.035,
-                'l0_113': 0.113, 'l0_113_rama': 0.113  # Dodaj specyficzne nazwy z Twoich materiałów
+                'l0_113': 0.113, 'l0_113_rama': 0.113
             }
             
             for material_keyword, conductivity_value in material_conductivity_map.items():
@@ -731,81 +826,7 @@ class THERM_OT_create_usection_base(bpy.types.Operator):
             import traceback
             traceback.print_exc()
             return 0.04  # Wartość domyślna
-
-
-
-
-
-
-    def find_conductivity_in_material(self, material):
-        """Znajduje wartość conductivity w materiale"""
         
-        # METODA 1: Sprawdź właściwości materiału
-        if hasattr(material, 'thermal_conductivity'):
-            return material.thermal_conductivity
-        
-        # METODA 2: Sprawdź custom properties
-        if 'conductivity' in material:
-            return material['conductivity']
-        if 'thermal_conductivity' in material:
-            return material['thermal_conductivity'] 
-        if 'lambda' in material:
-            return material['lambda']
-        
-        # METODA 3: Sprawdź w node'ach materiału
-        if material.use_nodes:
-            for node in material.node_tree.nodes:
-                # Sprawdź czy node ma conductivity
-                if hasattr(node, 'inputs'):
-                    for input in node.inputs:
-                        if input and hasattr(input, 'default_value'):
-                            # Sprawdź nazwę inputa
-                            if input.name.lower() in ['conductivity', 'thermal conductivity', 'lambda']:
-                                return input.default_value
-                
-                # Sprawdź nazwę i label node'a
-                node_name_lower = node.name.lower()
-                node_label_lower = node.label.lower() if node.label else ""
-                
-                if any(keyword in node_name_lower for keyword in ['conductivity', 'thermal', 'lambda']):
-                    if hasattr(node, 'outputs') and node.outputs:
-                        # Spróbuj pobrać wartość z pierwszego outputa
-                        try:
-                            return node.outputs[0].default_value
-                        except:
-                            pass
-        
-        # METODA 4: Sprawdź po nazwie materiału (heurystyka)
-        material_name_lower = material.name.lower()
-        
-        # Mapowanie nazw materiałów na typowe wartości conductivity
-        material_conductivity_map = {
-            'beton': 1.7, 'concrete': 1.7, 'cement': 1.7,
-            'cegła': 0.8, 'brick': 0.8, 'ceramika': 0.8,
-            'drewno': 0.15, 'wood': 0.15, 'timber': 0.15,
-            'szkło': 1.0, 'glass': 1.0,
-            'stal': 50.0, 'steel': 50.0, 'metal': 50.0,
-            'aluminium': 200.0, 'aluminum': 200.0,
-            'izolacja': 0.04, 'insulation': 0.04, 'wełna': 0.04, 'wool': 0.04,
-            'styropian': 0.035, 'eps': 0.035, 'xps': 0.035
-        }
-        
-        for material_keyword, conductivity_value in material_conductivity_map.items():
-            if material_keyword in material_name_lower:
-                return conductivity_value
-        
-        return None
-        
-    def find_all_ti_curves(self):
-        """Znajduje wszystkie krzywe Ti w scenie"""
-        ti_curves = []
-        for coll in bpy.data.collections:
-            if coll.name.startswith('THERM_Ti='):
-                for obj in coll.objects:
-                    if obj.type == 'CURVE':
-                        ti_curves.append(obj)
-        return ti_curves
-    
     def find_all_te_curves(self):
         """Znajduje wszystkie krzywe Te w scenie"""
         te_curves = []
@@ -888,6 +909,7 @@ class THERM_OT_create_usection_base(bpy.types.Operator):
             traceback.print_exc()
             return {'CANCELLED'}
 
+# Operatory dla tworzenia poszczególnych sekcji U
 class THERM_OT_create_usection_1(THERM_OT_create_usection_base):
     """Tworzy sekcję U1 z zaznaczonych krzywych Ti"""
     bl_idname = "therm.create_usection_1"
@@ -984,7 +1006,7 @@ class THERM_OT_create_usection_12(THERM_OT_create_usection_base):
     def execute(self, context):
         return self.create_usection("U12")
 
-# Możesz dodać tę funkcję tymczasowo do sprawdzenia sytuacji
+# Operatory debugujące
 class THERM_OT_debug_usections(bpy.types.Operator):
     """Debugowanie sekcji U"""
     bl_idname = "therm.debug_usections"
@@ -1035,7 +1057,7 @@ class THERM_OT_debug_sockets(bpy.types.Operator):
                         print(f"Grupa: {modifier.node_group.name}")
                         print("Socket-y INPUT:")
                         
-                        # Wejścia grupy - POPRAWIONE
+                        # Wejścia grupy
                         for item in modifier.node_group.interface.items_tree:
                             if hasattr(item, 'in_out') and item.in_out == 'INPUT':
                                 print(f"  - {item.name} (typ: {item.socket_type})")
@@ -1043,20 +1065,549 @@ class THERM_OT_debug_sockets(bpy.types.Operator):
                         # Socket-y w modyfikatorze
                         available_inputs = list(modifier.keys())
                         print(f"  Dostępne w modyfikatorze: {sorted(available_inputs)}")
-                        
-                        # Sprawdź panele
-                        print("  Panele:")
-                        for item in modifier.node_group.interface.items_tree:
-                            if hasattr(item, 'panel') and item.panel:
-                                print(f"    Panel: {item.panel.name}")
-                                # Sprawdź elementy w panelu
-                                for panel_item in modifier.node_group.interface.items_tree:
-                                    if hasattr(panel_item, 'parent') and panel_item.parent == item.panel:
-                                        print(f"      - {panel_item.name} (typ: {panel_item.socket_type})")
                         print("---")
         
         print("=== KONIEC DEBUG SOCKETS ===")
         return {'FINISHED'}
+
+
+
+# USUŃ te importy:
+# import pandas as pd
+
+# ZASTĄP funkcje bez użycia pandas:
+
+class THERM_OT_export_to_excel(bpy.types.Operator):
+    """Eksportuj dane do pliku Excel na podstawie pliku .thmx i Geometry Nodes"""
+    bl_idname = "therm.export_to_excel"
+    bl_label = "Eksportuj do Excel"
+    bl_description = "Eksportuj dane U-Value do pliku Excel na podstawie pliku .thmx i Geometry Nodes"
+    
+    def execute(self, context):
+        try:
+            blend_filepath = bpy.data.filepath
+            if not blend_filepath:
+                self.report({'ERROR'}, "Zapisz plik Blender przed eksportem do Excel")
+                return {'CANCELLED'}
+            
+            # Pobierz nazwę pliku blendera
+            blend_filename = os.path.splitext(os.path.basename(blend_filepath))[0]
+            blend_directory = os.path.dirname(blend_filepath)
+            
+            # Ścieżki do plików
+            thmx_file = os.path.join(blend_directory, f"{blend_filename}.thmx")
+            excel_file = os.path.join(blend_directory, f"{blend_filename}.xlsx")
+            template_file = os.path.join(blend_directory, "wzorzec.xlsx")
+            
+            # Sprawdź czy plik .thmx istnieje
+            if not os.path.exists(thmx_file):
+                self.report({'ERROR'}, f"Plik {thmx_file} nie istnieje. Najpierw wyeksportuj do THERM.")
+                return {'CANCELLED'}
+            
+            # Sprawdź czy plik wzorca istnieje
+            if not os.path.exists(template_file):
+                self.report({'ERROR'}, f"Plik wzorca {template_file} nie istnieje.")
+                return {'CANCELLED'}
+            
+            print(f"🔍 Przetwarzanie pliku: {thmx_file}")
+            
+            # Krok 1: Przetwórz plik .thmx - znajdź wartości PHI i strumień ciepła
+            phi_data, phi_heat_flux = self.extract_phi_factors_from_thmx(thmx_file)  # ZWRACA TERAZ 2 WARTOŚCI
+            temperatures = self.find_temperatures_from_thmx(thmx_file)
+            
+            # Krok 2: Pobierz wartości U z Geometry Nodes zaznaczonych krzywych
+            u_values_from_gn = self.get_u_values_from_selected_curves()
+            curve_lengths = self.get_lengths_from_selected_curves()
+            
+            # Krok 3: Skopiuj i wypełnij szablon Excel
+            success = self.copy_and_fill_excel_template(
+                template_file, excel_file, phi_data, temperatures, 
+                u_values_from_gn, curve_lengths, thmx_file, phi_heat_flux  # DODANO phi_heat_flux
+            )
+            
+            if success:
+                self.report({'INFO'}, f"Utworzono plik Excel: {excel_file}")
+                return {'FINISHED'}
+            else:
+                self.report({'ERROR'}, "Błąd podczas tworzenia pliku Excel")
+                return {'CANCELLED'}
+                
+        except Exception as e:
+            self.report({'ERROR'}, f"Błąd eksportu do Excel: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return {'CANCELLED'}
+    
+    def extract_phi_factors_from_thmx(self, thmx_file):
+        """Ekstrahuje wartości PHI z pliku .thmx i zwraca dane PHI oraz strumień ciepła"""
+        try:
+            with open(thmx_file, 'r', encoding='utf-8') as file:
+                content = file.read()
+            
+            # Usuń namespace dla prostszego parsowania
+            content = content.replace(' xmlns="http://windows.lbl.gov"', '')
+            root = ET.fromstring(content)
+            
+            phi_data = {}
+            phi_heat_flux = None
+            
+            # Szukaj wszystkich PHI-values
+            for phi_elem in root.findall('.//PHI-value'):
+                tag_elem = phi_elem.find('Tag')
+                if tag_elem is not None:
+                    tag = tag_elem.text
+                    value_elem = phi_elem.find('Value')
+                    if value_elem is not None:
+                        value_str = value_elem.get('value')
+                        if value_str and value_str != 'NA':
+                            phi_value = float(value_str)
+                            phi_data[tag] = phi_value
+                            print(f"Znaleziono PHI {tag} = {phi_value}")
+            
+            # Szukaj strumienia ciepła dla PHI w U-factors
+            for u_factor in root.findall('.//U-factors'):
+                tag_elem = u_factor.find('Tag')
+                if tag_elem is not None and 'PHI' in tag_elem.text:
+                    print(f"Znaleziono U-factors dla {tag_elem.text}")
+                    
+                    # Pobierz DeltaT
+                    delta_t_elem = u_factor.find('DeltaT')
+                    delta_t = float(delta_t_elem.get('value')) if delta_t_elem is not None else 40.0
+                    
+                    # Szukaj projekcji z "Total length"
+                    for projection in u_factor.findall('Projection'):
+                        length_type_elem = projection.find('Length-type')
+                        if length_type_elem is not None and 'Total length' in length_type_elem.text:
+                            
+                            # Pobierz długość
+                            length_elem = projection.find('Length')
+                            length_value = float(length_elem.get('value')) if length_elem is not None else 0.0
+                            
+                            # Pobierz wartość U
+                            u_factor_elem = projection.find('U-factor')
+                            if u_factor_elem is not None:
+                                u_value_str = u_factor_elem.get('value')
+                                if u_value_str and u_value_str != 'NA':
+                                    u_value = float(u_value_str)
+                                    
+                                    # OBLICZENIE STRUMIENIA CIEPŁA (tak jak w Twoim skrypcie)
+                                    heat_flux_per_meter = u_value * delta_t  # W/m
+                                    total_heat_flux = heat_flux_per_meter * (length_value / 1000.0)  # zamiana mm na m
+                                    
+                                    phi_heat_flux = total_heat_flux
+                                    print(f"🔥 Obliczono strumień ciepła dla PHI: {total_heat_flux:.6f} W")
+                                    print(f"   U = {u_value}, ΔT = {delta_t}, L = {length_value}mm")
+            
+            # Jeśli nie znaleziono PHI, szukaj w starych PSI (dla kompatybilności)
+            if not phi_data:
+                print("Nie znaleziono PHI, szukam PSI...")
+                for psi_elem in root.findall('.//PSI-value'):
+                    tag_elem = psi_elem.find('Tag')
+                    if tag_elem is not None:
+                        tag = tag_elem.text
+                        value_elem = psi_elem.find('Value')
+                        if value_elem is not None:
+                            value_str = value_elem.get('value')
+                            if value_str and value_str != 'NA':
+                                phi_value = float(value_str)
+                                # Zamień PSI na PHI w nazwie
+                                phi_tag = tag.replace('PSI', 'PHI') if 'PSI' in tag else tag
+                                phi_data[phi_tag] = phi_value
+                                print(f"Znaleziono PSI {tag} -> PHI {phi_tag} = {phi_value}")
+            
+            return phi_data, phi_heat_flux
+            
+        except Exception as e:
+            print(f"Błąd ekstrakcji PHI z .thmx: {e}")
+            return {}, None
+
+    def extract_heat_flux_from_thmx(self, thmx_file):
+        """Ekstrahuje strumień ciepła z pliku .thmx dla PHI"""
+        try:
+            with open(thmx_file, 'r', encoding='utf-8') as file:
+                content = file.read()
+            
+            # Usuń namespace dla prostszego parsowania
+            content = content.replace(' xmlns="http://windows.lbl.gov"', '')
+            root = ET.fromstring(content)
+            
+            # Szukaj PHI w U-factors i oblicz strumień ciepła
+            for u_factor in root.findall('.//U-factors'):
+                tag_elem = u_factor.find('Tag')
+                if tag_elem is not None and 'PHI' in tag_elem.text:
+                    print(f"Znaleziono U-factors dla {tag_elem.text}")
+                    
+                    # Pobierz DeltaT
+                    delta_t_elem = u_factor.find('DeltaT')
+                    delta_t = float(delta_t_elem.get('value')) if delta_t_elem is not None else 40.0
+                    
+                    # Szukaj projekcji z "Total length"
+                    for projection in u_factor.findall('Projection'):
+                        length_type_elem = projection.find('Length-type')
+                        if length_type_elem is not None and 'Total length' in length_type_elem.text:
+                            
+                            # Pobierz długość
+                            length_elem = projection.find('Length')
+                            length_value = float(length_elem.get('value')) if length_elem is not None else 0.0
+                            
+                            # Pobierz wartość U
+                            u_factor_elem = projection.find('U-factor')
+                            if u_factor_elem is not None:
+                                u_value_str = u_factor_elem.get('value')
+                                if u_value_str and u_value_str != 'NA':
+                                    u_value = float(u_value_str)
+                                    
+                                    # OBLICZENIE STRUMIENIA CIEPŁA (tak jak w Twoim skrypcie)
+                                    heat_flux_per_meter = u_value * delta_t  # W/m
+                                    total_heat_flux = heat_flux_per_meter * (length_value / 1000.0)  # zamiana mm na m
+                                    
+                                    print(f"🔥 Obliczono strumień ciepła dla PHI: {total_heat_flux:.6f} W")
+                                    print(f"   U = {u_value}, ΔT = {delta_t}, L = {length_value}mm")
+                                    return total_heat_flux
+            
+            print("❌ Nie znaleziono strumienia ciepła dla PHI w pliku .thmx")
+            return None
+            
+        except Exception as e:
+            print(f"❌ Błąd ekstrakcji strumienia ciepła: {e}")
+            return None
+
+
+
+
+    def find_temperatures_from_thmx(self, thmx_file):
+        """Znajduje temperatury z pliku .thmx"""
+        try:
+            with open(thmx_file, 'r', encoding='utf-8') as file:
+                content = file.read()
+            
+            content = content.replace(' xmlns="http://windows.lbl.gov"', '')
+            root = ET.fromstring(content)
+            
+            temperatures = {'Ti': None, 'Te': None}
+            
+            # Szukaj BoundaryConditions
+            for bc in root.findall('.//BoundaryCondition'):
+                name_elem = bc.find('Name')
+                if name_elem is not None:
+                    name = name_elem.text
+                    temp_elem = bc.find('Temperature')
+                    if temp_elem is not None:
+                        temp_value = float(temp_elem.get('value'))
+                        
+                        if 'Ti' in name:
+                            temperatures['Ti'] = temp_value
+                        elif 'Te' in name:
+                            temperatures['Te'] = temp_value
+            
+            # Alternatywne wyszukiwanie w BoundaryConditions
+            if temperatures['Ti'] is None or temperatures['Te'] is None:
+                for bc in root.findall('.//BoundaryCondition'):
+                    bc_name = bc.get('Name', '')
+                    temp_value = float(bc.get('Temperature', 0))
+                    
+                    if 'Ti' in bc_name and temperatures['Ti'] is None:
+                        temperatures['Ti'] = temp_value
+                    elif 'Te' in bc_name and temperatures['Te'] is None:
+                        temperatures['Te'] = temp_value
+            
+            print(f"Znalezione temperatury: Ti={temperatures['Ti']}, Te={temperatures['Te']}")
+            return temperatures
+            
+        except Exception as e:
+            print(f"Błąd wyszukiwania temperatur: {e}")
+            return {'Ti': None, 'Te': None}
+    
+    def get_u_values_from_selected_curves(self):
+        """Pobiera wartości U z Geometry Nodes zaznaczonych krzywych USection"""
+        u_values = {}
+        
+        for obj in bpy.context.selected_objects:
+            if obj.type == 'CURVE' and obj.name.startswith('USection_'):
+                # Pobierz numer USection (np. USection_U1 -> U1)
+                usection_num = obj.name.replace('USection_', '')
+                
+                # Sprawdź czy obiekt ma Geometry Nodes z wartością U
+                for modifier in obj.modifiers:
+                    if modifier.type == 'NODES' and modifier.node_group:
+                        # Sprawdź dostępne socket-y
+                        available_inputs = list(modifier.keys())
+                        
+                        # Szukaj socketu U-Value
+                        u_value_sockets = [s for s in available_inputs if 'u-value' in s.lower() or 'u_value' in s.lower() or s == 'Socket_26']
+                        
+                        if u_value_sockets:
+                            try:
+                                u_value = modifier[u_value_sockets[0]]
+                                u_values[usection_num] = u_value
+                                print(f"Znaleziono U-Value dla {usection_num}: {u_value}")
+                                break
+                            except Exception as e:
+                                print(f"Błąd pobierania U-Value dla {usection_num}: {e}")
+        
+        return u_values
+    
+    def get_lengths_from_selected_curves(self):
+        """Pobiera długości zaznaczonych krzywych USection"""
+        curve_lengths = {}
+        
+        for obj in bpy.context.selected_objects:
+            if obj.type == 'CURVE' and obj.name.startswith('USection_'):
+                # Pobierz numer USection
+                usection_num = obj.name.replace('USection_', '')
+                
+                # Oblicz długość krzywej
+                if obj.data.splines:
+                    spline = obj.data.splines[0]
+                    if len(spline.points) >= 2:
+                        # Oblicz długość między pierwszym a ostatnim punktem
+                        point1 = obj.matrix_world @ spline.points[0].co.xyz
+                        point2 = obj.matrix_world @ spline.points[-1].co.xyz
+                        length = (point2 - point1).length
+                        
+                        curve_lengths[usection_num] = length
+                        print(f"Długość krzywej {usection_num}: {length:.3f} m")
+        
+        return curve_lengths
+    
+    def copy_and_fill_excel_template(self, template_file, output_file, phi_data, temperatures, u_values, curve_lengths, thmx_file, phi_heat_flux=None):
+        """Kopiuje i wypełnia szablon Excel - z Ti, Te, strumieniem ciepła PHI i wartościami PHI"""
+        try:
+            # Spróbuj dodać ścieżkę użytkownika do sys.path
+            if not self.add_user_site_packages():
+                return self.create_fallback_data_file(output_file, phi_data, temperatures, u_values, curve_lengths, thmx_file, phi_heat_flux)
+            
+            # Teraz spróbuj zaimportować openpyxl
+            try:
+                from openpyxl import load_workbook
+            except ImportError:
+                print("❌ openpyxl wciąż niedostępny")
+                return self.create_fallback_data_file(output_file, phi_data, temperatures, u_values, curve_lengths, thmx_file, phi_heat_flux)
+            
+            # Skopiuj plik wzorca
+            shutil.copy2(template_file, output_file)
+            print(f"📋 Skopiowano wzorzec do: {output_file}")
+            
+            # Wczytaj skopiowany plik
+            workbook = load_workbook(output_file)
+            
+            # Sprawdź czy arkusz "Mostki Termiczne" istnieje
+            if "Mostki Termiczne" not in workbook.sheetnames:
+                print("❌ Błąd: Arkusz 'Mostki Termiczne' nie istnieje!")
+                # Spróbuj użyć pierwszego arkusza
+                sheet_name = workbook.sheetnames[0]
+                print(f"Używam arkusza: {sheet_name}")
+                worksheet = workbook[sheet_name]
+            else:
+                worksheet = workbook["Mostki Termiczne"]
+                print("📊 Pracuję na arkuszu: 'Mostki Termiczne'")
+            
+            # MAPOWANIE KOMÓREK
+            u_cell_mapping = {
+                'U1': 'B30', 'U2': 'D30', 'U3': 'F30', 'U4': 'H30', 'U5': 'J30', 'U6': 'L30',
+                'U7': 'B34', 'U8': 'D34', 'U9': 'F34', 'U10': 'H34', 'U11': 'J34', 'U12': 'L34'
+            }
+            
+            length_cell_mapping = {
+                'DL1': 'B40', 'DL2': 'D40', 'DL3': 'F40', 'DL4': 'H40', 'DL5': 'J40', 'DL6': 'L40',
+                'DL7': 'B44', 'DL8': 'D44', 'DL9': 'F44', 'DL10': 'H44', 'DL11': 'J44', 'DL12': 'L44'
+            }
+            
+            # MAPOWANIE KOMÓREK DLA PHI
+            phi_cell_mapping = {
+                'PHI1': 'B50', 'PHI2': 'D50', 'PHI3': 'F50', 'PHI4': 'H50', 'PHI5': 'J50', 'PHI6': 'L50',
+                'PHI7': 'B54', 'PHI8': 'D54', 'PHI9': 'F54', 'PHI10': 'H54', 'PHI11': 'J54', 'PHI12': 'L54'
+            }
+            
+            # 1. Wpisz temperatury Ti i Te
+            if temperatures['Ti'] is not None:
+                worksheet['F12'] = temperatures['Ti']
+                print(f"✅ Wpisano Ti = {temperatures['Ti']} °C do komórki F12")
+            
+            if temperatures['Te'] is not None:
+                worksheet['H12'] = temperatures['Te']
+                print(f"✅ Wpisano Te = {temperatures['Te']} °C do komórki H12")
+            
+            # 2. Wpisz strumień ciepła PHI do B20
+            if phi_heat_flux is not None:
+                worksheet['B20'] = phi_heat_flux
+                print(f"✅ Wpisano strumień ciepła PHI = {phi_heat_flux:.6f} W do komórki B20")
+            else:
+                # Spróbuj pobrać strumień ciepła jeśli nie został przekazany
+                heat_flux = self.extract_heat_flux_from_thmx(thmx_file)
+                if heat_flux is not None:
+                    worksheet['B20'] = heat_flux
+                    print(f"✅ Wpisano strumień ciepła PHI = {heat_flux:.6f} W do komórki B20")
+                else:
+                    print("⚠️  Nie znaleziono strumienia ciepła dla PHI - komórka B20 pozostanie pusta")
+            
+            # 3. Wpisz wartości U z Geometry Nodes
+            for usection_num, u_value in u_values.items():
+                if usection_num in u_cell_mapping:
+                    cell = u_cell_mapping[usection_num]
+                    worksheet[cell] = u_value
+                    print(f"✅ Wpisano {usection_num} = {u_value:.6f} W/m²K do komórki {cell}")
+            
+            # 4. Wpisz długości krzywych
+            for usection_num, length in curve_lengths.items():
+                dl_section = 'DL' + usection_num[1:] if usection_num.startswith('U') else usection_num
+                if dl_section in length_cell_mapping:
+                    cell = length_cell_mapping[dl_section]
+                    worksheet[cell] = length
+                    print(f"✅ Wpisano {dl_section} = {length:.3f} m do komórki {cell}")
+            
+            # 5. Wpisz wartości PHI z .thmx
+            for phi_name, phi_value in phi_data.items():
+                if phi_name in phi_cell_mapping:
+                    cell = phi_cell_mapping[phi_name]
+                    worksheet[cell] = phi_value
+                    print(f"✅ Wpisano {phi_name} = {phi_value:.6f} do komórki {cell}")
+            
+            # Zapisz zmiany
+            workbook.save(output_file)
+            workbook.close()
+            
+            print(f"🎉 Pomyślnie wypełniono plik Excel!")
+            
+            # Podsumowanie
+            print("\n📋 PODSUMOWANIE WYPEŁNIONYCH DANYCH:")
+            print(f"   🌡️  Ti: {temperatures['Ti']} °C (F12)")
+            print(f"   🌡️  Te: {temperatures['Te']} °C (H12)")
+            if phi_heat_flux is not None:
+                print(f"   🔥 Strumień ciepła PHI: {phi_heat_flux:.6f} W (B20)")
+            print(f"   🔥 Wartości U: {len(u_values)}")
+            print(f"   📏 Długości: {len(curve_lengths)}")
+            print(f"   Φ Wartości PHI: {len(phi_data)}")
+            
+            return True
+            
+        except Exception as e:
+            print(f"❌ Błąd przy wypełnianiu szablonu Excel: {e}")
+            import traceback
+            traceback.print_exc()
+            return self.create_fallback_data_file(output_file, phi_data, temperatures, u_values, curve_lengths, thmx_file, phi_heat_flux)
+
+
+    def calculate_total_heat_flux(self, u_values, curve_lengths, temperatures):
+        """Oblicza całkowity strumień ciepła przez wszystkie mostki termiczne"""
+        try:
+            if temperatures['Ti'] is None or temperatures['Te'] is None:
+                print("❌ Brak temperatur do obliczenia strumienia ciepła")
+                return None
+            
+            deltaT = temperatures['Ti'] - temperatures['Te']
+            print(f"🌡️  DeltaT = {temperatures['Ti']} - {temperatures['Te']} = {deltaT} °C")
+            
+            total_heat_flux = 0.0
+            
+            print("🔥 OBLICZANIE STRUMIENIA CIEPŁA:")
+            print("Mostek | U [W/m²K] | Długość [m] | ΔT [°C] | Strumień [W]")
+            print("-------|------------|-------------|----------|-------------")
+            
+            for usection_num, u_value in u_values.items():
+                if usection_num in curve_lengths:
+                    length = curve_lengths[usection_num]
+                    section_heat_flux = u_value * deltaT * length
+                    total_heat_flux += section_heat_flux
+                    
+                    print(f"{usection_num:6} | {u_value:10.6f} | {length:11.3f} | {deltaT:8} | {section_heat_flux:11.6f}")
+                else:
+                    print(f"{usection_num:6} | {u_value:10.6f} | {'BRAK':11} | {deltaT:8} | {'BRAK':11}")
+            
+            print(f"SUMA STRUMIENIA CIEPŁA: {total_heat_flux:.6f} W")
+            return total_heat_flux
+            
+        except Exception as e:
+            print(f"❌ Błąd obliczania strumienia ciepła: {e}")
+            return None
+
+    def add_user_site_packages(self):
+        """Dodaje ścieżkę do site-packages użytkownika do sys.path"""
+        import sys
+        import os
+        
+        # Ścieżka do site-packages użytkownika
+        user_site_packages = os.path.join(os.path.expanduser("~"), 
+                                        "AppData", "Roaming", 
+                                        "Python", "Python311", 
+                                        "site-packages")
+        
+        if os.path.exists(user_site_packages) and user_site_packages not in sys.path:
+            sys.path.append(user_site_packages)
+            print(f"✅ Dodano ścieżkę użytkownika: {user_site_packages}")
+            return True
+        
+        print(f"❌ Nie znaleziono ścieżki: {user_site_packages}")
+        return True
+
+    def create_fallback_data_file(self, output_file, phi_data, temperatures, u_values, curve_lengths, thmx_file, phi_heat_flux=None):
+        """Tworzy plik tekstowy z danymi gdy Excel nie jest dostępny - zaktualizowana z PHI"""
+        try:
+            data_file = output_file.replace('.xlsx', '_DANE.txt')
+            
+            # Pobierz strumień ciepła z .thmx jeśli nie został przekazany
+            if phi_heat_flux is None:
+                phi_heat_flux = self.extract_heat_flux_from_thmx(thmx_file)
+            
+            with open(data_file, 'w', encoding='utf-8') as f:
+                f.write("DANE EKSPORTOWANE Z BLENDERA\n")
+                f.write("=" * 50 + "\n")
+                f.write("Plik Excel nie mógł zostać wypełniony (brak openpyxl)\n")
+                f.write("Skopiuj poniższe wartości ręcznie do pliku wzorca.xlsx\n")
+                f.write("=" * 50 + "\n\n")
+                
+                f.write("🌡️  TEMPERATURY (wpisz ręcznie do Excel):\n")
+                f.write("F12 - Ti: {} °C\n".format(temperatures['Ti'] if temperatures['Ti'] is not None else "BRAK"))
+                f.write("H12 - Te: {} °C\n".format(temperatures['Te'] if temperatures['Te'] is not None else "BRAK"))
+                
+                if phi_heat_flux is not None:
+                    f.write("B20 - Strumień ciepła PHI: {:.6f} W\n".format(phi_heat_flux))
+                else:
+                    f.write("B20 - Strumień ciepła: NIE ZNALEZIONO W .thmx\n")
+                
+                f.write("\n" + "=" * 50 + "\n")
+                f.write("🗺️  MAPOWANIE KOMÓREK DO EXCEL:\n")
+                f.write("=" * 50 + "\n")
+                
+                f.write("\n🔥 WARTOŚCI U (komórki B30-L34):\n")
+                u_mapping = {
+                    'U1': 'B30', 'U2': 'D30', 'U3': 'F30', 'U4': 'H30', 'U5': 'J30', 'U6': 'L30',
+                    'U7': 'B34', 'U8': 'D34', 'U9': 'F34', 'U10': 'H34', 'U11': 'J34', 'U12': 'L34'
+                }
+                
+                for usection_num, u_value in u_values.items():
+                    if usection_num in u_mapping:
+                        f.write("{} - {}: {:.6f} W/m²K\n".format(u_mapping[usection_num], usection_num, u_value))
+                
+                f.write("\n📏 DŁUGOŚCI (komórki B40-L44):\n")
+                length_mapping = {
+                    'DL1': 'B40', 'DL2': 'D40', 'DL3': 'F40', 'DL4': 'H40', 'DL5': 'J40', 'DL6': 'L40',
+                    'DL7': 'B44', 'DL8': 'D44', 'DL9': 'F44', 'DL10': 'H44', 'DL11': 'J44', 'DL12': 'L44'
+                }
+                
+                for usection_num, length in curve_lengths.items():
+                    dl_section = 'DL' + usection_num[1:] if usection_num.startswith('U') else usection_num
+                    if dl_section in length_mapping:
+                        f.write("{} - {}: {:.3f} m\n".format(length_mapping[dl_section], dl_section, length))
+                
+                f.write("\nΦ WARTOŚCI PHI (komórki B50-L54):\n")
+                phi_mapping = {
+                    'PHI1': 'B50', 'PHI2': 'D50', 'PHI3': 'F50', 'PHI4': 'H50', 'PHI5': 'J50', 'PHI6': 'L50',
+                    'PHI7': 'B54', 'PHI8': 'D54', 'PHI9': 'F54', 'PHI10': 'H54', 'PHI11': 'J54', 'PHI12': 'L54'
+                }
+                
+                for phi_name, phi_value in phi_data.items():
+                    if phi_name in phi_mapping:
+                        f.write("{} - {}: {:.6f}\n".format(phi_mapping[phi_name], phi_name, phi_value))
+            
+            print(f"📄 Utworzono plik z instrukcjami: {data_file}")
+            print("ℹ️  Skopiuj wartości ręcznie do pliku wzorca.xlsx")
+            
+            return True
+            
+        except Exception as e:
+            print(f"❌ Błąd przy tworzeniu pliku z danymi: {e}")
+            return False
 # Lista wszystkich klas operatorów do rejestracji
 classes = (
     THERM_OT_check_normals,
@@ -1093,8 +1644,9 @@ classes = (
     THERM_OT_create_usection_10,
     THERM_OT_create_usection_11,
     THERM_OT_create_usection_12,
-    THERM_OT_debug_usections,  # Dodaj tę klasę tymczasowo
-    THERM_OT_debug_sockets
+    THERM_OT_debug_usections,
+    THERM_OT_debug_sockets,
+    THERM_OT_export_to_excel  # DODAJ TĘ LINIĘ
 )
 
 def register():
