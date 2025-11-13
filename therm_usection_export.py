@@ -291,8 +291,107 @@ class THERMUSectionExporter:
             traceback.print_exc()
             return False
 
-
-
+    def export_to_excel_with_additional_heat_flows(self, thmx_filepath, excel_filepath):
+        """Eksportuje wyniki do Excela z wszystkimi strumieniami ciepła"""
+        try:
+            import openpyxl
+            
+            # Sprawdź czy plik THMX istnieje
+            if not os.path.exists(thmx_filepath):
+                print(f"❌ Plik THMX nie istnieje: {thmx_filepath}")
+                return False
+            
+            # Parsuj plik THMX
+            tree = ET.parse(thmx_filepath)
+            root = tree.getroot()
+            
+            # Znajdź wszystkie U-factors z różnymi Tagami
+            heat_flows = {}
+            
+            # Szukaj wszystkich sekcji U-factors
+            for ufactors_elem in root.findall('.//U-factors'):
+                tag_elem = ufactors_elem.find('Tag')
+                if tag_elem is not None and tag_elem.text:
+                    tag_name = tag_elem.text.strip()
+                    
+                    # Dla każdego Tag szukamy wartości U-factor dla "Total length"
+                    ufactor_value = None
+                    
+                    for projection in ufactors_elem.findall('Projection'):
+                        length_type = projection.find('Length-type')
+                        if length_type is not None and length_type.text == 'Total length':
+                            ufactor_elem = projection.find('U-factor')
+                            if ufactor_elem is not None:
+                                # Sprawdź czy wartość jest w atrybucie 'value'
+                                if 'value' in ufactor_elem.attrib:
+                                    ufactor_value = ufactor_elem.attrib['value']
+                                # Sprawdź czy wartość jest w treści elementu
+                                elif ufactor_elem.text and ufactor_elem.text.strip():
+                                    ufactor_value = ufactor_elem.text.strip()
+                                break
+                    
+                    # Zapisz wartość jeśli znaleziono i nie jest "NA"
+                    if ufactor_value and ufactor_value != 'NA':
+                        try:
+                            heat_flows[tag_name] = float(ufactor_value)
+                        except ValueError:
+                            # Jeśli nie można przekonwertować na float, zapisz jako string
+                            heat_flows[tag_name] = ufactor_value
+            
+            print(f"📊 Znalezione strumienie ciepła: {heat_flows}")
+            
+            # Otwórz plik Excel
+            if os.path.exists(excel_filepath):
+                wb = openpyxl.load_workbook(excel_filepath)
+            else:
+                wb = openpyxl.Workbook()
+                # Jeśli tworzymy nowy plik, ustaw domyślny arkusz
+                ws = wb.active
+                ws.title = "THERM Results"
+            
+            # Wybierz aktywny arkusz
+            ws = wb.active
+            
+            # Przygotuj listę strumieni do eksportu (maksymalnie 6)
+            heat_flow_list = list(heat_flows.items())[:6]
+            
+            # Wstaw nazwy strumieni do komórek B22, D22, F22, H22, J22, L22
+            heat_flow_headers = ['B22', 'D22', 'F22', 'H22', 'J22', 'L22']
+            
+            # Wstaw wartości strumieni do komórek B24, D24, F24, H24, J24, L24
+            heat_flow_values = ['B24', 'D24', 'F24', 'H24', 'J24', 'L24']
+            
+            # Wyczyść poprzednie dane
+            for header_cell in heat_flow_headers:
+                ws[header_cell] = ""
+            
+            for value_cell in heat_flow_values:
+                ws[value_cell] = ""
+            
+            # Wstaw dane do Excela
+            for i, (flow_name, flow_value) in enumerate(heat_flow_list):
+                if i < len(heat_flow_headers):
+                    # Wstaw nazwę strumienia
+                    ws[heat_flow_headers[i]] = flow_name
+                    # Wstaw wartość strumienia
+                    ws[heat_flow_values[i]] = flow_value
+                    print(f"   📝 {flow_name}: {flow_value} -> {heat_flow_headers[i]}/{heat_flow_values[i]}")
+            
+            # Jeśli brakuje danych, wyświetl informację
+            if len(heat_flow_list) < 6:
+                print(f"   ℹ️  Znaleziono tylko {len(heat_flow_list)} strumieni z 6 możliwych")
+            
+            # Zapisz plik Excel
+            wb.save(excel_filepath)
+            print(f"✅ Wyeksportowano {len(heat_flow_list)} strumieni ciepła do: {excel_filepath}")
+            return True
+            
+        except Exception as e:
+            print(f"❌ Błąd eksportu do Excel: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+        
     def export_selected_usections(self, context):
         """Eksportuje TYLKO ZAZNACZONE U-Sections"""
         try:
@@ -348,6 +447,11 @@ class THERMUSectionExporter:
                 # Eksportuj
                 if self.export_usection_thmx(curve_obj, filepath):
                     exported_files.append(filepath)
+                    
+                    # Eksportuj do Excela z dodatkowymi strumieniami ciepła
+                    excel_filename = f"{base_name}-{usection_name}_results.xlsx"
+                    excel_filepath = os.path.join(base_dir, excel_filename)
+                    self.export_to_excel_with_additional_heat_flows(filepath, excel_filepath)
             
             print(f"📦 Wyeksportowano {len(exported_files)} ZAZNACZONYCH plików U-Section")
             return exported_files
@@ -456,6 +560,11 @@ class THERMUSectionExporter:
                 # Eksportuj
                 if self.export_usection_thmx(curve_obj, filepath):
                     exported_files.append(filepath)
+                    
+                    # Eksportuj do Excela z dodatkowymi strumieniami ciepła
+                    excel_filename = f"{base_name}-{usection_name}_results.xlsx"
+                    excel_filepath = os.path.join(base_dir, excel_filename)
+                    self.export_to_excel_with_additional_heat_flows(filepath, excel_filepath)
             
             print(f"📦 Wyeksportowano {len(exported_files)} plików U-Section")
             return exported_files
@@ -507,6 +616,10 @@ class THERMUSectionExporter:
                 if runner._run_therm_calculation_thmx(filepath):
                     success_count += 1
                     print(f"✅ Ukończono obliczenia: {os.path.basename(filepath)}")
+                    
+                    # Po obliczeniach eksportuj wyniki do Excela
+                    excel_filepath = filepath.replace('.thmx', '_results.xlsx')
+                    self.export_to_excel_with_additional_heat_flows(filepath, excel_filepath)
                 else:
                     print(f"❌ Błąd obliczeń: {os.path.basename(filepath)}")
             

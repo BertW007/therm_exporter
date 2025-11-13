@@ -1111,8 +1111,8 @@ class THERM_OT_export_to_excel(bpy.types.Operator):
             
             print(f"🔍 Przetwarzanie pliku: {thmx_file}")
             
-            # Krok 1: Przetwórz plik .thmx - znajdź wartości PHI i strumień ciepła
-            phi_data, phi_heat_flux = self.extract_phi_factors_from_thmx(thmx_file)  # ZWRACA TERAZ 2 WARTOŚCI
+            # Krok 1: Przetwórz plik .thmx - znajdź WSZYSTKIE U-Factors
+            all_u_factors = self.extract_all_u_factors_from_thmx(thmx_file)
             temperatures = self.find_temperatures_from_thmx(thmx_file)
             
             # Krok 2: Pobierz wartości U z Geometry Nodes zaznaczonych krzywych
@@ -1121,8 +1121,8 @@ class THERM_OT_export_to_excel(bpy.types.Operator):
             
             # Krok 3: Skopiuj i wypełnij szablon Excel
             success = self.copy_and_fill_excel_template(
-                template_file, excel_file, phi_data, temperatures, 
-                u_values_from_gn, curve_lengths, thmx_file, phi_heat_flux  # DODANO phi_heat_flux
+                template_file, excel_file, all_u_factors, temperatures, 
+                u_values_from_gn, curve_lengths, thmx_file
             )
             
             if success:
@@ -1138,8 +1138,8 @@ class THERM_OT_export_to_excel(bpy.types.Operator):
             traceback.print_exc()
             return {'CANCELLED'}
     
-    def extract_phi_factors_from_thmx(self, thmx_file):
-        """Ekstrahuje wartości PHI z pliku .thmx i zwraca dane PHI oraz strumień ciepła"""
+    def extract_all_u_factors_from_thmx(self, thmx_file):
+        """Ekstrahuje WSZYSTKIE U-Factors z pliku .thmx"""
         try:
             with open(thmx_file, 'r', encoding='utf-8') as file:
                 content = file.read()
@@ -1148,133 +1148,38 @@ class THERM_OT_export_to_excel(bpy.types.Operator):
             content = content.replace(' xmlns="http://windows.lbl.gov"', '')
             root = ET.fromstring(content)
             
-            phi_data = {}
-            phi_heat_flux = None
+            all_u_factors = {}
             
-            # Szukaj wszystkich PHI-values
-            for phi_elem in root.findall('.//PHI-value'):
-                tag_elem = phi_elem.find('Tag')
-                if tag_elem is not None:
-                    tag = tag_elem.text
-                    value_elem = phi_elem.find('Value')
-                    if value_elem is not None:
-                        value_str = value_elem.get('value')
-                        if value_str and value_str != 'NA':
-                            phi_value = float(value_str)
-                            phi_data[tag] = phi_value
-                            print(f"Znaleziono PHI {tag} = {phi_value}")
-            
-            # Szukaj strumienia ciepła dla PHI w U-factors
+            # Szukaj wszystkich U-factors
             for u_factor in root.findall('.//U-factors'):
                 tag_elem = u_factor.find('Tag')
-                if tag_elem is not None and 'PHI' in tag_elem.text:
-                    print(f"Znaleziono U-factors dla {tag_elem.text}")
+                if tag_elem is not None and tag_elem.text:
+                    tag = tag_elem.text.strip()
                     
-                    # Pobierz DeltaT
-                    delta_t_elem = u_factor.find('DeltaT')
-                    delta_t = float(delta_t_elem.get('value')) if delta_t_elem is not None else 40.0
-                    
-                    # Szukaj projekcji z "Total length"
+                    # Szukaj wartości U dla "Total length"
                     for projection in u_factor.findall('Projection'):
                         length_type_elem = projection.find('Length-type')
                         if length_type_elem is not None and 'Total length' in length_type_elem.text:
-                            
-                            # Pobierz długość
-                            length_elem = projection.find('Length')
-                            length_value = float(length_elem.get('value')) if length_elem is not None else 0.0
                             
                             # Pobierz wartość U
                             u_factor_elem = projection.find('U-factor')
                             if u_factor_elem is not None:
                                 u_value_str = u_factor_elem.get('value')
                                 if u_value_str and u_value_str != 'NA':
-                                    u_value = float(u_value_str)
-                                    
-                                    # OBLICZENIE STRUMIENIA CIEPŁA (tak jak w Twoim skrypcie)
-                                    heat_flux_per_meter = u_value * delta_t  # W/m
-                                    total_heat_flux = heat_flux_per_meter * (length_value / 1000.0)  # zamiana mm na m
-                                    
-                                    phi_heat_flux = total_heat_flux
-                                    print(f"🔥 Obliczono strumień ciepła dla PHI: {total_heat_flux:.6f} W")
-                                    print(f"   U = {u_value}, ΔT = {delta_t}, L = {length_value}mm")
+                                    try:
+                                        u_value = float(u_value_str)
+                                        all_u_factors[tag] = u_value
+                                        print(f"Znaleziono U-Factor '{tag}' = {u_value}")
+                                        break  # Tylko pierwsza znaleziona wartość dla Total length
+                                    except ValueError:
+                                        print(f"Nieprawidłowa wartość U dla '{tag}': {u_value_str}")
             
-            # Jeśli nie znaleziono PHI, szukaj w starych PSI (dla kompatybilności)
-            if not phi_data:
-                print("Nie znaleziono PHI, szukam PSI...")
-                for psi_elem in root.findall('.//PSI-value'):
-                    tag_elem = psi_elem.find('Tag')
-                    if tag_elem is not None:
-                        tag = tag_elem.text
-                        value_elem = psi_elem.find('Value')
-                        if value_elem is not None:
-                            value_str = value_elem.get('value')
-                            if value_str and value_str != 'NA':
-                                phi_value = float(value_str)
-                                # Zamień PSI na PHI w nazwie
-                                phi_tag = tag.replace('PSI', 'PHI') if 'PSI' in tag else tag
-                                phi_data[phi_tag] = phi_value
-                                print(f"Znaleziono PSI {tag} -> PHI {phi_tag} = {phi_value}")
-            
-            return phi_data, phi_heat_flux
+            return all_u_factors
             
         except Exception as e:
-            print(f"Błąd ekstrakcji PHI z .thmx: {e}")
-            return {}, None
-
-    def extract_heat_flux_from_thmx(self, thmx_file):
-        """Ekstrahuje strumień ciepła z pliku .thmx dla PHI"""
-        try:
-            with open(thmx_file, 'r', encoding='utf-8') as file:
-                content = file.read()
-            
-            # Usuń namespace dla prostszego parsowania
-            content = content.replace(' xmlns="http://windows.lbl.gov"', '')
-            root = ET.fromstring(content)
-            
-            # Szukaj PHI w U-factors i oblicz strumień ciepła
-            for u_factor in root.findall('.//U-factors'):
-                tag_elem = u_factor.find('Tag')
-                if tag_elem is not None and 'PHI' in tag_elem.text:
-                    print(f"Znaleziono U-factors dla {tag_elem.text}")
-                    
-                    # Pobierz DeltaT
-                    delta_t_elem = u_factor.find('DeltaT')
-                    delta_t = float(delta_t_elem.get('value')) if delta_t_elem is not None else 40.0
-                    
-                    # Szukaj projekcji z "Total length"
-                    for projection in u_factor.findall('Projection'):
-                        length_type_elem = projection.find('Length-type')
-                        if length_type_elem is not None and 'Total length' in length_type_elem.text:
-                            
-                            # Pobierz długość
-                            length_elem = projection.find('Length')
-                            length_value = float(length_elem.get('value')) if length_elem is not None else 0.0
-                            
-                            # Pobierz wartość U
-                            u_factor_elem = projection.find('U-factor')
-                            if u_factor_elem is not None:
-                                u_value_str = u_factor_elem.get('value')
-                                if u_value_str and u_value_str != 'NA':
-                                    u_value = float(u_value_str)
-                                    
-                                    # OBLICZENIE STRUMIENIA CIEPŁA (tak jak w Twoim skrypcie)
-                                    heat_flux_per_meter = u_value * delta_t  # W/m
-                                    total_heat_flux = heat_flux_per_meter * (length_value / 1000.0)  # zamiana mm na m
-                                    
-                                    print(f"🔥 Obliczono strumień ciepła dla PHI: {total_heat_flux:.6f} W")
-                                    print(f"   U = {u_value}, ΔT = {delta_t}, L = {length_value}mm")
-                                    return total_heat_flux
-            
-            print("❌ Nie znaleziono strumienia ciepła dla PHI w pliku .thmx")
-            return None
-            
-        except Exception as e:
-            print(f"❌ Błąd ekstrakcji strumienia ciepła: {e}")
-            return None
-
-
-
-
+            print(f"Błąd ekstrakcji U-Factors z .thmx: {e}")
+            return {}
+    
     def find_temperatures_from_thmx(self, thmx_file):
         """Znajduje temperatury z pliku .thmx"""
         try:
@@ -1317,6 +1222,54 @@ class THERM_OT_export_to_excel(bpy.types.Operator):
         except Exception as e:
             print(f"Błąd wyszukiwania temperatur: {e}")
             return {'Ti': None, 'Te': None}
+    
+    def extract_heat_flux_for_tag(self, thmx_file, tag_name):
+        """Ekstrahuje strumień ciepła dla konkretnego tagu"""
+        try:
+            with open(thmx_file, 'r', encoding='utf-8') as file:
+                content = file.read()
+            
+            content = content.replace(' xmlns="http://windows.lbl.gov"', '')
+            root = ET.fromstring(content)
+            
+            # Szukaj konkretnego tagu
+            for u_factor in root.findall('.//U-factors'):
+                tag_elem = u_factor.find('Tag')
+                if tag_elem is not None and tag_elem.text and tag_elem.text.strip() == tag_name:
+                    print(f"Znaleziono U-factors dla '{tag_name}'")
+                    
+                    # Pobierz DeltaT
+                    delta_t_elem = u_factor.find('DeltaT')
+                    delta_t = float(delta_t_elem.get('value')) if delta_t_elem is not None else 40.0
+                    
+                    # Szukaj projekcji z "Total length"
+                    for projection in u_factor.findall('Projection'):
+                        length_type_elem = projection.find('Length-type')
+                        if length_type_elem is not None and 'Total length' in length_type_elem.text:
+                            
+                            # Pobierz długość
+                            length_elem = projection.find('Length')
+                            length_value = float(length_elem.get('value')) if length_elem is not None else 0.0
+                            
+                            # Pobierz wartość U
+                            u_factor_elem = projection.find('U-factor')
+                            if u_factor_elem is not None:
+                                u_value_str = u_factor_elem.get('value')
+                                if u_value_str and u_value_str != 'NA':
+                                    u_value = float(u_value_str)
+                                    
+                                    # OBLICZENIE STRUMIENIA CIEPŁA
+                                    heat_flux_per_meter = u_value * delta_t  # W/m
+                                    total_heat_flux = heat_flux_per_meter * (length_value / 1000.0)  # zamiana mm na m
+                                    
+                                    print(f"🔥 Obliczono strumień ciepła dla '{tag_name}': {total_heat_flux:.6f} W")
+                                    print(f"   U = {u_value}, ΔT = {delta_t}, L = {length_value}mm")
+                                    return total_heat_flux
+            return None
+            
+        except Exception as e:
+            print(f"❌ Błąd ekstrakcji strumienia ciepła dla '{tag_name}': {e}")
+            return None
     
     def get_u_values_from_selected_curves(self):
         """Pobiera wartości U z Geometry Nodes zaznaczonych krzywych USection"""
@@ -1370,19 +1323,19 @@ class THERM_OT_export_to_excel(bpy.types.Operator):
         
         return curve_lengths
     
-    def copy_and_fill_excel_template(self, template_file, output_file, phi_data, temperatures, u_values, curve_lengths, thmx_file, phi_heat_flux=None):
-        """Kopiuje i wypełnia szablon Excel - z Ti, Te, strumieniem ciepła PHI i wartościami PHI"""
+    def copy_and_fill_excel_template(self, template_file, output_file, all_u_factors, temperatures, u_values, curve_lengths, thmx_file):
+        """Kopiuje i wypełnia szablon Excel z WSZYSTKIMI U-Factors"""
         try:
             # Spróbuj dodać ścieżkę użytkownika do sys.path
             if not self.add_user_site_packages():
-                return self.create_fallback_data_file(output_file, phi_data, temperatures, u_values, curve_lengths, thmx_file, phi_heat_flux)
+                return self.create_fallback_data_file(output_file, all_u_factors, temperatures, u_values, curve_lengths, thmx_file)
             
             # Teraz spróbuj zaimportować openpyxl
             try:
                 from openpyxl import load_workbook
             except ImportError:
                 print("❌ openpyxl wciąż niedostępny")
-                return self.create_fallback_data_file(output_file, phi_data, temperatures, u_values, curve_lengths, thmx_file, phi_heat_flux)
+                return self.create_fallback_data_file(output_file, all_u_factors, temperatures, u_values, curve_lengths, thmx_file)
             
             # Skopiuj plik wzorca
             shutil.copy2(template_file, output_file)
@@ -1402,7 +1355,26 @@ class THERM_OT_export_to_excel(bpy.types.Operator):
                 worksheet = workbook["Mostki Termiczne"]
                 print("📊 Pracuję na arkuszu: 'Mostki Termiczne'")
             
-            # MAPOWANIE KOMÓREK
+            # MAPOWANIE KOMÓREK DLA U-FACTORS (nazwy i wartości) - DLA POZOSTAŁYCH TAGÓW
+            tag_cell_mapping = {
+                0: 'B22',  # Pierwszy tag (poza PHI)
+                1: 'D22',  # Drugi tag  
+                2: 'F22',  # Trzeci tag
+                3: 'H22',  # Czwarty tag
+                4: 'J22',  # Piąty tag
+                5: 'L22'   # Szósty tag
+            }
+            
+            value_cell_mapping = {
+                0: 'B24',  # Pierwsza wartość (poza PHI)
+                1: 'D24',  # Druga wartość
+                2: 'F24',  # Trzecia wartość
+                3: 'H24',  # Czwarta wartość
+                4: 'J24',  # Piąta wartość
+                5: 'L24'   # Szósta wartość
+            }
+            
+            # MAPOWANIE KOMÓREK DLA USection
             u_cell_mapping = {
                 'U1': 'B30', 'U2': 'D30', 'U3': 'F30', 'U4': 'H30', 'U5': 'J30', 'U6': 'L30',
                 'U7': 'B34', 'U8': 'D34', 'U9': 'F34', 'U10': 'H34', 'U11': 'J34', 'U12': 'L34'
@@ -1411,12 +1383,6 @@ class THERM_OT_export_to_excel(bpy.types.Operator):
             length_cell_mapping = {
                 'DL1': 'B40', 'DL2': 'D40', 'DL3': 'F40', 'DL4': 'H40', 'DL5': 'J40', 'DL6': 'L40',
                 'DL7': 'B44', 'DL8': 'D44', 'DL9': 'F44', 'DL10': 'H44', 'DL11': 'J44', 'DL12': 'L44'
-            }
-            
-            # MAPOWANIE KOMÓREK DLA PHI
-            phi_cell_mapping = {
-                'PHI1': 'B50', 'PHI2': 'D50', 'PHI3': 'F50', 'PHI4': 'H50', 'PHI5': 'J50', 'PHI6': 'L50',
-                'PHI7': 'B54', 'PHI8': 'D54', 'PHI9': 'F54', 'PHI10': 'H54', 'PHI11': 'J54', 'PHI12': 'L54'
             }
             
             # 1. Wpisz temperatury Ti i Te
@@ -1428,40 +1394,58 @@ class THERM_OT_export_to_excel(bpy.types.Operator):
                 worksheet['H12'] = temperatures['Te']
                 print(f"✅ Wpisano Te = {temperatures['Te']} °C do komórki H12")
             
-            # 2. Wpisz strumień ciepła PHI do B20
-            if phi_heat_flux is not None:
-                worksheet['B20'] = phi_heat_flux
-                print(f"✅ Wpisano strumień ciepła PHI = {phi_heat_flux:.6f} W do komórki B20")
-            else:
-                # Spróbuj pobrać strumień ciepła jeśli nie został przekazany
-                heat_flux = self.extract_heat_flux_from_thmx(thmx_file)
-                if heat_flux is not None:
-                    worksheet['B20'] = heat_flux
-                    print(f"✅ Wpisano strumień ciepła PHI = {heat_flux:.6f} W do komórki B20")
+            # 2. Wpisz PHI do B20 (jak dotychczas)
+            if 'PHI' in all_u_factors:
+                phi_heat_flux = self.extract_heat_flux_for_tag(thmx_file, 'PHI')
+                if phi_heat_flux is not None:
+                    worksheet['B20'] = phi_heat_flux
+                    print(f"✅ Wpisano strumień ciepła PHI = {phi_heat_flux:.6f} W do komórki B20")
                 else:
-                    print("⚠️  Nie znaleziono strumienia ciepła dla PHI - komórka B20 pozostanie pusta")
+                    # Jeśli nie znaleziono strumienia, wpisz samą wartość U
+                    worksheet['B20'] = all_u_factors['PHI']
+                    print(f"✅ Wpisano PHI = {all_u_factors['PHI']:.6f} W/m²K do komórki B20")
             
-            # 3. Wpisz wartości U z Geometry Nodes
+            # 3. Wpisz POZOSTAŁE U-Factors (bez PHI) do odpowiednich komórek
+            other_u_factors = {tag: value for tag, value in all_u_factors.items() if tag != 'PHI'}
+            
+            print(f"📊 Wpisywanie {len(other_u_factors)} POZOSTAŁYCH U-Factors do Excela:")
+            
+            # Posortuj tagi alfabetycznie
+            sorted_tags = sorted(other_u_factors.keys())
+            
+            for i, tag in enumerate(sorted_tags[:6]):  # Maksymalnie 6 tagów (poza PHI)
+                if i < len(tag_cell_mapping):
+                    tag_cell = tag_cell_mapping[i]
+                    value_cell = value_cell_mapping[i]
+                    u_value = other_u_factors[tag]
+                    
+                    # Wpisz nazwę tagu
+                    worksheet[tag_cell] = tag
+                    
+                    # Oblicz i wpisz strumień ciepła
+                    heat_flux = self.extract_heat_flux_for_tag(thmx_file, tag)
+                    if heat_flux is not None:
+                        worksheet[value_cell] = heat_flux
+                        print(f"✅ Wpisano '{tag}' = {heat_flux:.6f} W do komórki {value_cell}")
+                    else:
+                        # Jeśli nie znaleziono strumienia, wpisz samą wartość U
+                        worksheet[value_cell] = u_value
+                        print(f"✅ Wpisano '{tag}' = {u_value:.6f} W/m²K do komórki {value_cell}")
+            
+            # 4. Wpisz wartości U z Geometry Nodes
             for usection_num, u_value in u_values.items():
                 if usection_num in u_cell_mapping:
                     cell = u_cell_mapping[usection_num]
                     worksheet[cell] = u_value
                     print(f"✅ Wpisano {usection_num} = {u_value:.6f} W/m²K do komórki {cell}")
             
-            # 4. Wpisz długości krzywych
+            # 5. Wpisz długości krzywych
             for usection_num, length in curve_lengths.items():
                 dl_section = 'DL' + usection_num[1:] if usection_num.startswith('U') else usection_num
                 if dl_section in length_cell_mapping:
                     cell = length_cell_mapping[dl_section]
                     worksheet[cell] = length
                     print(f"✅ Wpisano {dl_section} = {length:.3f} m do komórki {cell}")
-            
-            # 5. Wpisz wartości PHI z .thmx
-            for phi_name, phi_value in phi_data.items():
-                if phi_name in phi_cell_mapping:
-                    cell = phi_cell_mapping[phi_name]
-                    worksheet[cell] = phi_value
-                    print(f"✅ Wpisano {phi_name} = {phi_value:.6f} do komórki {cell}")
             
             # Zapisz zmiany
             workbook.save(output_file)
@@ -1473,11 +1457,11 @@ class THERM_OT_export_to_excel(bpy.types.Operator):
             print("\n📋 PODSUMOWANIE WYPEŁNIONYCH DANYCH:")
             print(f"   🌡️  Ti: {temperatures['Ti']} °C (F12)")
             print(f"   🌡️  Te: {temperatures['Te']} °C (H12)")
-            if phi_heat_flux is not None:
-                print(f"   🔥 Strumień ciepła PHI: {phi_heat_flux:.6f} W (B20)")
-            print(f"   🔥 Wartości U: {len(u_values)}")
+            if 'PHI' in all_u_factors:
+                print(f"   🔥 PHI: {all_u_factors['PHI']:.6f} (B20)")
+            print(f"   🔥 Pozostałe U-Factors: {len(other_u_factors)}")
+            print(f"   🔥 Wartości U z GN: {len(u_values)}")
             print(f"   📏 Długości: {len(curve_lengths)}")
-            print(f"   Φ Wartości PHI: {len(phi_data)}")
             
             return True
             
@@ -1485,41 +1469,7 @@ class THERM_OT_export_to_excel(bpy.types.Operator):
             print(f"❌ Błąd przy wypełnianiu szablonu Excel: {e}")
             import traceback
             traceback.print_exc()
-            return self.create_fallback_data_file(output_file, phi_data, temperatures, u_values, curve_lengths, thmx_file, phi_heat_flux)
-
-
-    def calculate_total_heat_flux(self, u_values, curve_lengths, temperatures):
-        """Oblicza całkowity strumień ciepła przez wszystkie mostki termiczne"""
-        try:
-            if temperatures['Ti'] is None or temperatures['Te'] is None:
-                print("❌ Brak temperatur do obliczenia strumienia ciepła")
-                return None
-            
-            deltaT = temperatures['Ti'] - temperatures['Te']
-            print(f"🌡️  DeltaT = {temperatures['Ti']} - {temperatures['Te']} = {deltaT} °C")
-            
-            total_heat_flux = 0.0
-            
-            print("🔥 OBLICZANIE STRUMIENIA CIEPŁA:")
-            print("Mostek | U [W/m²K] | Długość [m] | ΔT [°C] | Strumień [W]")
-            print("-------|------------|-------------|----------|-------------")
-            
-            for usection_num, u_value in u_values.items():
-                if usection_num in curve_lengths:
-                    length = curve_lengths[usection_num]
-                    section_heat_flux = u_value * deltaT * length
-                    total_heat_flux += section_heat_flux
-                    
-                    print(f"{usection_num:6} | {u_value:10.6f} | {length:11.3f} | {deltaT:8} | {section_heat_flux:11.6f}")
-                else:
-                    print(f"{usection_num:6} | {u_value:10.6f} | {'BRAK':11} | {deltaT:8} | {'BRAK':11}")
-            
-            print(f"SUMA STRUMIENIA CIEPŁA: {total_heat_flux:.6f} W")
-            return total_heat_flux
-            
-        except Exception as e:
-            print(f"❌ Błąd obliczania strumienia ciepła: {e}")
-            return None
+            return self.create_fallback_data_file(output_file, all_u_factors, temperatures, u_values, curve_lengths, thmx_file)
 
     def add_user_site_packages(self):
         """Dodaje ścieżkę do site-packages użytkownika do sys.path"""
@@ -1540,14 +1490,10 @@ class THERM_OT_export_to_excel(bpy.types.Operator):
         print(f"❌ Nie znaleziono ścieżki: {user_site_packages}")
         return True
 
-    def create_fallback_data_file(self, output_file, phi_data, temperatures, u_values, curve_lengths, thmx_file, phi_heat_flux=None):
-        """Tworzy plik tekstowy z danymi gdy Excel nie jest dostępny - zaktualizowana z PHI"""
+    def create_fallback_data_file(self, output_file, all_u_factors, temperatures, u_values, curve_lengths, thmx_file):
+        """Tworzy plik tekstowy z danymi gdy Excel nie jest dostępny"""
         try:
             data_file = output_file.replace('.xlsx', '_DANE.txt')
-            
-            # Pobierz strumień ciepła z .thmx jeśli nie został przekazany
-            if phi_heat_flux is None:
-                phi_heat_flux = self.extract_heat_flux_from_thmx(thmx_file)
             
             with open(data_file, 'w', encoding='utf-8') as f:
                 f.write("DANE EKSPORTOWANE Z BLENDERA\n")
@@ -1560,10 +1506,44 @@ class THERM_OT_export_to_excel(bpy.types.Operator):
                 f.write("F12 - Ti: {} °C\n".format(temperatures['Ti'] if temperatures['Ti'] is not None else "BRAK"))
                 f.write("H12 - Te: {} °C\n".format(temperatures['Te'] if temperatures['Te'] is not None else "BRAK"))
                 
-                if phi_heat_flux is not None:
-                    f.write("B20 - Strumień ciepła PHI: {:.6f} W\n".format(phi_heat_flux))
-                else:
-                    f.write("B20 - Strumień ciepła: NIE ZNALEZIONO W .thmx\n")
+                f.write("\n" + "=" * 50 + "\n")
+                f.write("🔥 WSZYSTKIE U-FACTORS Z .thmx:\n")
+                f.write("=" * 50 + "\n")
+                
+                # PHI do B20
+                if 'PHI' in all_u_factors:
+                    phi_heat_flux = self.extract_heat_flux_for_tag(thmx_file, 'PHI')
+                    if phi_heat_flux is not None:
+                        f.write("B20 - PHI: {:.6f} W\n".format(phi_heat_flux))
+                    else:
+                        f.write("B20 - PHI: {:.6f} W/m²K\n".format(all_u_factors['PHI']))
+                
+                # POZOSTAŁE U-Factors do nowych komórek
+                other_u_factors = {tag: value for tag, value in all_u_factors.items() if tag != 'PHI'}
+                sorted_tags = sorted(other_u_factors.keys())
+                
+                # MAPOWANIE KOMÓREK DLA POZOSTAŁYCH U-FACTORS
+                tag_mapping = {
+                    0: 'B22/B24',  # Nazwa/Wartość
+                    1: 'D22/D24',  
+                    2: 'F22/F24',  
+                    3: 'H22/H24',  
+                    4: 'J22/J24',  
+                    5: 'L22/L24'   
+                }
+                
+                for i, tag in enumerate(sorted_tags[:6]):
+                    if i in tag_mapping:
+                        cells = tag_mapping[i]
+                        u_value = other_u_factors[tag]
+                        
+                        # Oblicz strumień ciepła
+                        heat_flux = self.extract_heat_flux_for_tag(thmx_file, tag)
+                        
+                        if heat_flux is not None:
+                            f.write("{} - {}: {:.6f} W\n".format(cells, tag, heat_flux))
+                        else:
+                            f.write("{} - {}: {:.6f} W/m²K\n".format(cells, tag, u_value))
                 
                 f.write("\n" + "=" * 50 + "\n")
                 f.write("🗺️  MAPOWANIE KOMÓREK DO EXCEL:\n")
@@ -1589,16 +1569,6 @@ class THERM_OT_export_to_excel(bpy.types.Operator):
                     dl_section = 'DL' + usection_num[1:] if usection_num.startswith('U') else usection_num
                     if dl_section in length_mapping:
                         f.write("{} - {}: {:.3f} m\n".format(length_mapping[dl_section], dl_section, length))
-                
-                f.write("\nΦ WARTOŚCI PHI (komórki B50-L54):\n")
-                phi_mapping = {
-                    'PHI1': 'B50', 'PHI2': 'D50', 'PHI3': 'F50', 'PHI4': 'H50', 'PHI5': 'J50', 'PHI6': 'L50',
-                    'PHI7': 'B54', 'PHI8': 'D54', 'PHI9': 'F54', 'PHI10': 'H54', 'PHI11': 'J54', 'PHI12': 'L54'
-                }
-                
-                for phi_name, phi_value in phi_data.items():
-                    if phi_name in phi_mapping:
-                        f.write("{} - {}: {:.6f}\n".format(phi_mapping[phi_name], phi_name, phi_value))
             
             print(f"📄 Utworzono plik z instrukcjami: {data_file}")
             print("ℹ️  Skopiuj wartości ręcznie do pliku wzorca.xlsx")
@@ -1608,6 +1578,7 @@ class THERM_OT_export_to_excel(bpy.types.Operator):
         except Exception as e:
             print(f"❌ Błąd przy tworzeniu pliku z danymi: {e}")
             return False
+
 # Lista wszystkich klas operatorów do rejestracji
 classes = (
     THERM_OT_check_normals,

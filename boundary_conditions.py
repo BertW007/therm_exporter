@@ -135,7 +135,7 @@ def create_arrow_geometry_nodes(curve_obj, arrow_type):
         print(f"Błąd dodawania geometry nodes: {e}")
 
 def create_continuous_curve_from_edges(list_type='Ti', ufactor_name=None):
-    """Tworzy osobne krzywe dla każdej zaznaczonej krawędzi (każda z 2 punktami)"""
+    """Tworzy osobne krzywe dla każdej zaznaczonej krawędzi (każda z 2 punktami) - SPRAWDZA DUPLIKATY"""
 
     original_mode = bpy.context.mode
     original_active = bpy.context.active_object
@@ -161,6 +161,7 @@ def create_continuous_curve_from_edges(list_type='Ti', ufactor_name=None):
     all_objects = [obj for obj in bpy.context.scene.objects if obj.type == 'MESH']
     
     curve_counter = 1
+    skipped_count = 0
     
     for edge_data in ordered_edges_data:
         obj = edge_data['object']
@@ -187,9 +188,19 @@ def create_continuous_curve_from_edges(list_type='Ti', ufactor_name=None):
                 final_v1, final_v2 = v2, v1
                 print(f"  Odwrócono kierunek krawędzi {curve_counter}")
             
-            # Sprawdź czy krzywa już istnieje
-            if is_curve_duplicate(final_v1, final_v2, target_collection):
+            # SPRAWDŹ CZY KRZYWA JUŻ ISTNIEJE NA TEJ KRAWĘDZI (tylko kolidujące typy)
+            existing_curve_type = get_existing_curve_type_on_edge(final_v1, final_v2, list_type)
+            if existing_curve_type:
+                print(f"  ⚠️  Pominięto krawędź {curve_counter} - istnieje już krzywa typu {existing_curve_type}")
+                skipped_count += 1
+                curve_counter += 1
+                continue
+            
+            # Sprawdź czy krzywa już istnieje (tylko dla tego samego typu)
+            if list_type != 'UFactor' and is_curve_duplicate(final_v1, final_v2, target_collection):
                 print(f"  Pominięto duplikat krzywej {curve_counter}")
+                skipped_count += 1
+                curve_counter += 1
                 continue
             
             # Utwórz nazwę krzywej
@@ -247,10 +258,8 @@ def create_continuous_curve_from_edges(list_type='Ti', ufactor_name=None):
     if was_in_edit_mode:
         bpy.ops.object.mode_set(mode='EDIT')
     
-    print(f"Utworzono {len(created_curves)} pojedynczych krzywych w kolekcji '{collection_name}'")
+    print(f"Utworzono {len(created_curves)} pojedynczych krzywych w kolekcji '{collection_name}', pominięto {skipped_count} duplikatów")
     return created_curves
-
-
 
 def is_geometry_on_left_side_simple(v1, v2, normal_2d, all_objects):
     """Uproszczona wersja sprawdzania geometrii po lewej stronie dla pojedynczej krawędzi"""
@@ -494,7 +503,7 @@ def is_curve_duplicate(v1, v2, collection):
     return False
 
 def create_auto_curves_on_external_edges(list_type='Adiabatic', ufactor_name=None):
-    """Tworzy krzywe automatycznie na zewnętrznych krawędziach z kierunkiem lewoskrętnym"""
+    """Tworzy krzywe automatycznie na zewnętrznych krawędziach z kierunkiem lewoskrętnym - SPRAWDZA DUPLIKATY"""
     
     print(f"=== TWORZENIE AUTOMATYCZNYCH KRZYWYCH {list_type} NA ZEWNĘTRZNYCH KRAWĘDZIACH ===")
     
@@ -519,31 +528,116 @@ def create_auto_curves_on_external_edges(list_type='Adiabatic', ufactor_name=Non
     created_curves = []
     all_objects = [obj for obj in bpy.context.scene.objects if obj.type == 'MESH']
     
+    skipped_count = 0
+    
     for i, edge_data in enumerate(external_edges):
         v1_final, v2_final = ensure_correct_edge_direction(edge_data, all_objects)
         
-        if not is_curve_duplicate(v1_final, v2_final, target_collection):
-            if list_type == 'UFactor' and ufactor_name:
-                curve_name = f"UFactor_{ufactor_name}_{edge_data['object_name']}_{i+1}"
-            elif list_type == 'Ti':
-                ti_temp = bpy.context.scene.therm_edge_props.ti_temperature
-                ti_rsi = bpy.context.scene.therm_edge_props.ti_rsi
-                curve_name = f"Ti={ti_temp}_Rsi={ti_rsi:.3f}_{edge_data['object_name']}_{i+1}"
-            elif list_type == 'Te':
-                te_temp = bpy.context.scene.therm_edge_props.te_temperature
-                te_rse = bpy.context.scene.therm_edge_props.te_rse
-                curve_name = f"Te={te_temp}_Rse={te_rse:.3f}_{edge_data['object_name']}_{i+1}"
-            else:
-                curve_name = f"{list_type}_{edge_data['object_name']}_{i+1}"
+        # SPRAWDŹ CZY NA TEJ KRAWĘDZI JUŻ ISTNIEJE KOLIDUJĄCA KRZYWA
+        existing_curve_type = get_existing_curve_type_on_edge(v1_final, v2_final, list_type)
+        
+        if existing_curve_type:
+            print(f"  ⚠️  Pominięto krawędź {i+1} - istnieje już krzywa typu {existing_curve_type}")
+            skipped_count += 1
+            continue
+        
+        # Sprawdź również prostym duplikatem (tylko dla tego samego typu)
+        if list_type != 'UFactor' and has_existing_curve_on_edge(v1_final, v2_final):
+            skipped_count += 1
+            continue
+        
+        if list_type == 'UFactor' and ufactor_name:
+            curve_name = f"UFactor_{ufactor_name}_{edge_data['object_name']}_{i+1}"
+        elif list_type == 'Ti':
+            ti_temp = bpy.context.scene.therm_edge_props.ti_temperature
+            ti_rsi = bpy.context.scene.therm_edge_props.ti_rsi
+            curve_name = f"Ti={ti_temp}_Rsi={ti_rsi:.3f}_{edge_data['object_name']}_{i+1}"
+        elif list_type == 'Te':
+            te_temp = bpy.context.scene.therm_edge_props.te_temperature
+            te_rse = bpy.context.scene.therm_edge_props.te_rse
+            curve_name = f"Te={te_temp}_Rse={te_rse:.3f}_{edge_data['object_name']}_{i+1}"
+        else:
+            curve_name = f"{list_type}_{edge_data['object_name']}_{i+1}"
+        
+        curve_obj = create_curve_between_points_with_direction(v1_final, v2_final, curve_name, target_collection, list_type)
+        
+        if curve_obj:
+            created_curves.append(curve_obj)
+            print(f"Utworzono krzywą: {curve_name}")
             
-            curve_obj = create_curve_between_points_with_direction(v1_final, v2_final, curve_name, target_collection, list_type)
-            
-            if curve_obj:
-                created_curves.append(curve_obj)
-                print(f"Utworzono krzywą: {curve_name}")
-                
-                edge_vector = v2_final - v1_final
-                print(f"  Kierunek: {v1_final} -> {v2_final} (długość: {edge_vector.length:.3f}m)")
+            edge_vector = v2_final - v1_final
+            print(f"  Kierunek: {v1_final} -> {v2_final} (długość: {edge_vector.length:.3f}m)")
     
-    print(f"=== UTWORZONO {len(created_curves)} KRZYWYCH {list_type} NA ZEWNĘTRZNYCH KRAWĘDZIACH ===")
+    print(f"=== UTWORZONO {len(created_curves)} KRZYWYCH {list_type}, POMINIĘTO {skipped_count} DUPLIKATÓW ===")
     return created_curves
+
+def has_existing_curve_on_edge(v1, v2, tolerance=0.001):
+    """Sprawdza czy na krawędzi już istnieje jakaś krzywa warunku brzegowego"""
+    for coll in bpy.data.collections:
+        if coll.name.startswith('THERM_'):
+            for obj in coll.objects:
+                if obj.type == 'CURVE' and obj.data.splines:
+                    spline = obj.data.splines[0]
+                    if len(spline.points) >= 2:
+                        existing_v1 = Vector((spline.points[0].co.x, spline.points[0].co.y, spline.points[0].co.z))
+                        existing_v2 = Vector((spline.points[1].co.x, spline.points[1].co.y, spline.points[1].co.z))
+                        
+                        if ((v1 - existing_v1).length < tolerance and (v2 - existing_v2).length < tolerance) or \
+                           ((v1 - existing_v2).length < tolerance and (v2 - existing_v1).length < tolerance):
+                            print(f"  ⚠️  Pominięto - istnieje już krzywa {obj.name} w kolekcji {coll.name}")
+                            return True
+    return False
+
+def get_existing_curve_type_on_edge(v1, v2, list_type=None, tolerance=0.001):
+    """Zwraca typ istniejącej krzywej na krawędzi lub None jeśli nie ma
+    list_type: jeśli podany, sprawdza tylko krzywe które kolidują z tym typem"""
+    
+    for coll in bpy.data.collections:
+        if coll.name.startswith('THERM_'):
+            curve_type = None
+            if coll.name.startswith('THERM_Ti='):
+                curve_type = 'Ti'
+            elif coll.name.startswith('THERM_Te='):
+                curve_type = 'Te'
+            elif coll.name == 'THERM_Adiabatic':
+                curve_type = 'Adiabatic'
+            elif coll.name.startswith('THERM_UFactor_'):
+                curve_type = 'UFactor'
+            
+            # SPRAWDŹ CZY TEN TYP KRZYWEJ KOLIDUJE Z list_type
+            if list_type and not do_curve_types_collide(list_type, curve_type):
+                continue  # Pomijaj krzywe które nie kolidują
+            
+            for obj in coll.objects:
+                if obj.type == 'CURVE' and obj.data.splines:
+                    spline = obj.data.splines[0]
+                    if len(spline.points) >= 2:
+                        existing_v1 = Vector((spline.points[0].co.x, spline.points[0].co.y, spline.points[0].co.z))
+                        existing_v2 = Vector((spline.points[1].co.x, spline.points[1].co.y, spline.points[1].co.z))
+                        
+                        if ((v1 - existing_v1).length < tolerance and (v2 - existing_v2).length < tolerance) or \
+                           ((v1 - existing_v2).length < tolerance and (v2 - existing_v1).length < tolerance):
+                            return curve_type
+    return None
+
+
+
+def do_curve_types_collide(new_type, existing_type):
+    """Sprawdza czy dwa typy krzywych kolidują (nie mogą istnieć razem na tej samej krawędzi)"""
+    
+    # Jeśli któryś z typów jest None (nie znaleziono krzywej), nie ma kolizji
+    if existing_type is None:
+        return False
+    
+    # U-Factor może współistnieć z dowolnym innym typem
+    if new_type == 'UFactor' or existing_type == 'UFactor':
+        return False
+    
+    # Ti, Te, Adiabatic nie mogą współistnieć ze sobą
+    collision_groups = [['Ti', 'Te', 'Adiabatic']]
+    
+    for group in collision_groups:
+        if new_type in group and existing_type in group:
+            return True
+    
+    return False

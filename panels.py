@@ -221,6 +221,54 @@ class THERM_PT_panel(bpy.types.Panel):
         else:
             box.label(text="Brak kolekcji THERM", icon='INFO')
         
+        # SEKCJA U-SECTIONS
+        box = layout.box()
+        box.label(text="Sekcje U:", icon='MOD_ARRAY')
+        
+        # Informacja o zaznaczeniu
+        selected_count = len(bpy.context.selected_objects)
+        box.label(text=f"Zaznacz JEDNĄ krzywą Ti ({selected_count} obiektów zaznaczonych)", icon='INFO')
+        
+        # Sprawdź które USection już istnieją
+        existing_usections = []
+        for obj in bpy.data.objects:
+            if obj.name.startswith('USection_'):
+                existing_usections.append(obj.name.replace('USection_', ''))
+        
+        if existing_usections:
+            box.label(text=f"Istniejące: {', '.join(sorted(existing_usections))}", icon='CURVE_DATA')
+        
+        # Pierwszy wiersz U1-U6
+        row = box.row(align=True)
+        row.operator("therm.create_usection_1", text="U1")
+        row.operator("therm.create_usection_2", text="U2")
+        row.operator("therm.create_usection_3", text="U3")
+        row.operator("therm.create_usection_4", text="U4")
+        row.operator("therm.create_usection_5", text="U5")
+        row.operator("therm.create_usection_6", text="U6")
+        
+        # Drugi wiersz U7-U12
+        row = box.row(align=True)
+        row.operator("therm.create_usection_7", text="U7")
+        row.operator("therm.create_usection_8", text="U8")
+        row.operator("therm.create_usection_9", text="U9")
+        row.operator("therm.create_usection_10", text="U10")
+        row.operator("therm.create_usection_11", text="U11")
+        row.operator("therm.create_usection_12", text="U12")
+        
+        # Instrukcja
+        box.label(text="Uwaga: Tworzy USection_U1 z zaznaczonej krzywej Ti", icon='RESTRICT_SELECT_OFF')
+        box.label(text="Automatycznie ustawia wartości w Geometry Nodes", icon='NODETREE')
+
+        # Tymczasowo dodaj w sekcji U-Sections:
+        row = box.row()
+        row.operator("therm.debug_usections", text="Debug", icon='CONSOLE')
+
+        # W panels.py, w sekcji U-Sections:
+        row = box.row()
+        row.operator("therm.debug_sockets", text="Debug Sockets", icon='NODETREE')        
+        
+        
         # Eksport
         box = layout.box()
         box.label(text="Opcje eksportu:")
@@ -267,52 +315,7 @@ class THERM_PT_panel(bpy.types.Panel):
             
 
 
-        # SEKCJA U-SECTIONS
-        box = layout.box()
-        box.label(text="Sekcje U:", icon='MOD_ARRAY')
         
-        # Informacja o zaznaczeniu
-        selected_count = len(bpy.context.selected_objects)
-        box.label(text=f"Zaznacz JEDNĄ krzywą Ti ({selected_count} obiektów zaznaczonych)", icon='INFO')
-        
-        # Sprawdź które USection już istnieją
-        existing_usections = []
-        for obj in bpy.data.objects:
-            if obj.name.startswith('USection_'):
-                existing_usections.append(obj.name.replace('USection_', ''))
-        
-        if existing_usections:
-            box.label(text=f"Istniejące: {', '.join(sorted(existing_usections))}", icon='CURVE_DATA')
-        
-        # Pierwszy wiersz U1-U6
-        row = box.row(align=True)
-        row.operator("therm.create_usection_1", text="U1")
-        row.operator("therm.create_usection_2", text="U2")
-        row.operator("therm.create_usection_3", text="U3")
-        row.operator("therm.create_usection_4", text="U4")
-        row.operator("therm.create_usection_5", text="U5")
-        row.operator("therm.create_usection_6", text="U6")
-        
-        # Drugi wiersz U7-U12
-        row = box.row(align=True)
-        row.operator("therm.create_usection_7", text="U7")
-        row.operator("therm.create_usection_8", text="U8")
-        row.operator("therm.create_usection_9", text="U9")
-        row.operator("therm.create_usection_10", text="U10")
-        row.operator("therm.create_usection_11", text="U11")
-        row.operator("therm.create_usection_12", text="U12")
-        
-        # Instrukcja
-        box.label(text="Uwaga: Tworzy USection_U1 z zaznaczonej krzywej Ti", icon='RESTRICT_SELECT_OFF')
-        box.label(text="Automatycznie ustawia wartości w Geometry Nodes", icon='NODETREE')
-
-        # Tymczasowo dodaj w sekcji U-Sections:
-        row = box.row()
-        row.operator("therm.debug_usections", text="Debug", icon='CONSOLE')
-
-        # W panels.py, w sekcji U-Sections:
-        row = box.row()
-        row.operator("therm.debug_sockets", text="Debug Sockets", icon='NODETREE')
 
 
         # Eksport do Excel
